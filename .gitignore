@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+build/
+dist/
+artifacts/
+
+# Runtime output
+screenshots-output/
+tests/.out/
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env / secrets
+.env
+.env.*
+!.env.example

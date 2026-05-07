@@ -1,0 +1,78 @@
+devices:
+  # ── Mobile · Small (budget / older) ──
+  - { name: "iPhone SE (3rd gen)",     category: mobile-small, viewport: { width: 375, height: 667 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "iPhone 13 mini",          category: mobile-small, viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Galaxy A15",              category: mobile-small, viewport: { width: 360, height: 800 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "Pixel 6a",                category: mobile-small, viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+
+  # ── Mobile · Standard (current flagship class) ──
+  - { name: "iPhone 14",               category: mobile, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 15",               category: mobile, viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 15 Pro",           category: mobile, viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 16",               category: mobile, viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 17",               category: mobile, viewport: { width: 402, height: 874 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 17 Pro",           category: mobile, viewport: { width: 402, height: 874 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Pixel 8",                 category: mobile, viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Pixel 9",                 category: mobile, viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Pixel 10",                category: mobile, viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Galaxy S24",              category: mobile, viewport: { width: 384, height: 854 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Galaxy S25",              category: mobile, viewport: { width: 384, height: 854 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Galaxy S26",              category: mobile, viewport: { width: 384, height: 854 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "OnePlus 12",              category: mobile, viewport: { width: 412, height: 919 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Xiaomi 14",               category: mobile, viewport: { width: 393, height: 873 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+
+  # ── Mobile · Large (Pro Max / Ultra) ──
+  - { name: "iPhone 15 Pro Max",       category: mobile-large, viewport: { width: 430, height: 932 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 16 Pro Max",       category: mobile-large, viewport: { width: 440, height: 956 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "iPhone 17 Pro Max",       category: mobile-large, viewport: { width: 440, height: 956 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Pixel 9 Pro XL",          category: mobile-large, viewport: { width: 448, height: 998 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Galaxy S25 Ultra",        category: mobile-large, viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3.5 }
+  - { name: "Galaxy S26 Ultra",        category: mobile-large, viewport: { width: 412, height: 919 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3.5 }
+  - { name: "OnePlus 13",              category: mobile-large, viewport: { width: 450, height: 1000 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+
+  # ── Foldable · Folded (cover screen) ──
+  - { name: "Galaxy Z Fold 6 (folded)", category: foldable-folded, viewport: { width: 376, height: 968 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Galaxy Z Fold 7 (folded)", category: foldable-folded, viewport: { width: 380, height: 968 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Galaxy Z Flip 6 (folded)", category: foldable-folded, viewport: { width: 360, height: 320 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Pixel Fold (folded)",      category: foldable-folded, viewport: { width: 367, height: 841 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+
+  # ── Foldable · Open (inner screen) ──
+  - { name: "Galaxy Z Fold 6 (open)",   category: foldable-open, viewport: { width: 884, height: 1128 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Galaxy Z Fold 7 (open)",   category: foldable-open, viewport: { width: 902, height: 1148 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+  - { name: "Galaxy Z Flip 6 (open)",   category: foldable-open, viewport: { width: 412, height: 920 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }
+  - { name: "Pixel Fold (open)",        category: foldable-open, viewport: { width: 838, height: 1132 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625 }
+
+  # ── Tablet · Small ──
+  - { name: "iPad mini (6th gen)",     category: tablet-small, viewport: { width: 744, height: 1133 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "iPad mini (7th gen)",     category: tablet-small, viewport: { width: 744, height: 1133 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+
+  # ── Tablet · Standard / Pro ──
+  - { name: "iPad (10th gen)",         category: tablet, viewport: { width: 810, height: 1080 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "iPad Air 11\"",           category: tablet, viewport: { width: 820, height: 1180 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "iPad Air 13\"",           category: tablet, viewport: { width: 1024, height: 1366 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "iPad Pro 11\"",           category: tablet, viewport: { width: 834, height: 1194 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "iPad Pro 13\"",           category: tablet, viewport: { width: 1024, height: 1366 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "Galaxy Tab S9",           category: tablet, viewport: { width: 800, height: 1280 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.25 }
+  - { name: "Galaxy Tab S10 Ultra",    category: tablet, viewport: { width: 962, height: 1481 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+  - { name: "Surface Pro 9",           category: tablet, viewport: { width: 912, height: 1368 }, hasTouch: true, deviceScaleFactor: 2 }
+
+  # ── Laptop ──
+  - { name: "Laptop · 13\" (1280×800)",       category: laptop, viewport: { width: 1280, height: 800 } }
+  - { name: "MacBook Air 13\" (1440×900)",    category: laptop, viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 }
+  - { name: "MacBook Pro 14\" (1512×982)",    category: laptop, viewport: { width: 1512, height: 982 }, deviceScaleFactor: 2 }
+  - { name: "MacBook Pro 16\" (1728×1117)",   category: laptop, viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2 }
+  - { name: "Laptop · HD (1366×768)",         category: laptop, viewport: { width: 1366, height: 768 } }
+  - { name: "Laptop · FHD (1920×1080)",       category: laptop, viewport: { width: 1920, height: 1080 } }
+
+  # ── Desktop ──
+  - { name: "Desktop · FHD (1920×1080)",      category: desktop, viewport: { width: 1920, height: 1080 } }
+  - { name: "Desktop · QHD (2560×1440)",      category: desktop, viewport: { width: 2560, height: 1440 } }
+  - { name: "Desktop · 4K (3840×2160)",       category: desktop, viewport: { width: 3840, height: 2160 }, deviceScaleFactor: 2 }
+  - { name: "iMac 24\" (2240×1260)",          category: desktop, viewport: { width: 2240, height: 1260 }, deviceScaleFactor: 2 }
+  - { name: "Studio Display (2560×1440)",     category: desktop, viewport: { width: 2560, height: 1440 }, deviceScaleFactor: 2 }
+  - { name: "Pro Display XDR (3008×1692)",    category: desktop, viewport: { width: 3008, height: 1692 }, deviceScaleFactor: 2 }
+
+  # ── Ultrawide ──
+  - { name: "Ultrawide (3440×1440)",          category: ultrawide, viewport: { width: 3440, height: 1440 } }
+  - { name: "Super Ultrawide (5120×1440)",    category: ultrawide, viewport: { width: 5120, height: 1440 } }
+  - { name: "Dual UHD (7680×2160)",           category: ultrawide, viewport: { width: 7680, height: 2160 } }

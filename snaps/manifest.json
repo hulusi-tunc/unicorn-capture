@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "sessions": [
+    {
+      "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+      "startedAt": "2026-05-07T11:35:31.536Z",
+      "snaps": [
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 1,
+          "platform": "ios",
+          "route": "/",
+          "navStack": [],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/001-x-default.png",
+          "capturedAt": "2026-05-07T11:36:10.926Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 2,
+          "platform": "ios",
+          "route": "/",
+          "navStack": [],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/002-x-default.png",
+          "capturedAt": "2026-05-07T11:36:21.400Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 3,
+          "platform": "ios",
+          "route": "/sign-in",
+          "navStack": [
+            "sign-in"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/003-sign-in-default.png",
+          "capturedAt": "2026-05-07T11:36:27.867Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 4,
+          "platform": "ios",
+          "route": "/sign-up",
+          "navStack": [
+            "sign-up"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/004-sign-up-default.png",
+          "capturedAt": "2026-05-07T11:36:35.280Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 5,
+          "platform": "ios",
+          "route": "/sign-up",
+          "navStack": [
+            "sign-up"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/005-sign-up-default.png",
+          "capturedAt": "2026-05-07T11:36:41.978Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 6,
+          "platform": "ios",
+          "route": "/sign-up",
+          "navStack": [
+            "sign-up"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/006-sign-up-default.png",
+          "capturedAt": "2026-05-07T11:36:43.724Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 7,
+          "platform": "ios",
+          "route": "/registration",
+          "navStack": [
+            "registration"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/007-registration-default.png",
+          "capturedAt": "2026-05-07T11:37:02.933Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 8,
+          "platform": "ios",
+          "route": "/",
+          "navStack": [
+            "(tabs)"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/008-x-default.png",
+          "capturedAt": "2026-05-07T11:37:38.861Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 9,
+          "platform": "ios",
+          "route": "/",
+          "navStack": [
+            "(tabs)"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/009-x-default.png",
+          "capturedAt": "2026-05-07T11:37:43.626Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 10,
+          "platform": "ios",
+          "route": "/",
+          "navStack": [
+            "(tabs)"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/010-x-default.png",
+          "capturedAt": "2026-05-07T11:37:48.735Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 11,
+          "platform": "ios",
+          "route": "/",
+          "navStack": [
+            "(tabs)"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/011-x-default.png",
+          "capturedAt": "2026-05-07T11:37:51.567Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 12,
+          "platform": "ios",
+          "route": "/bookings",
+          "navStack": [
+            "(tabs)",
+            "bookings"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/012-bookings-default.png",
+          "capturedAt": "2026-05-07T11:37:55.520Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 13,
+          "platform": "ios",
+          "route": "/events",
+          "navStack": [
+            "(tabs)",
+            "events"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/013-events-default.png",
+          "capturedAt": "2026-05-07T11:37:58.811Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 14,
+          "platform": "ios",
+          "route": "/profile",
+          "navStack": [
+            "(tabs)",
+            "profile"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/014-profile-default.png",
+          "capturedAt": "2026-05-07T11:38:01.827Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 15,
+          "platform": "ios",
+          "route": "/reservation/abc123",
+          "navStack": [
+            "reservation",
+            "[id]"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/015-reservation-abc123-default.png",
+          "capturedAt": "2026-05-07T11:38:08.767Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 16,
+          "platform": "ios",
+          "route": "/reservation/abc123",
+          "navStack": [
+            "reservation",
+            "[id]"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/016-reservation-abc123-default.png",
+          "capturedAt": "2026-05-07T11:38:13.442Z"
+        },
+        {
+          "projectId": "folleli",
+          "sessionId": "session-2026-05-07T11-35-31-531-60hk",
+          "sequence": 17,
+          "platform": "ios",
+          "route": "/reservation/abc123",
+          "navStack": [
+            "reservation",
+            "[id]"
+          ],
+          "stateHash": "default",
+          "image": "screenshots/session-2026-05-07T11-35-31-531-60hk/017-reservation-abc123-default.png",
+          "capturedAt": "2026-05-07T11:38:16.752Z"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+	"name": "@unicorn-studio/capture",
+	"version": "0.0.1",
+	"description": "Unicorn Capture — desktop snap tool that auto-categorizes screens by route/state/session for the Unicorn Studio gallery platform. Forked from Prisma.",
+	"type": "module",
+	"scripts": {
+		"start": "electrobun dev",
+		"dev": "electrobun dev --watch",
+		"snap": "bun src/bun/cli.ts",
+		"build": "electrobun build",
+		"build:canary": "electrobun build --env=canary",
+		"build:stable": "electrobun build --env=stable",
+		"lint": "biome check src/",
+		"lint:fix": "biome check --write src/",
+		"ci": "biome check src/ && electrobun build"
+	},
+	"dependencies": {
+		"electrobun": "^1.18.1",
+		"js-yaml": "^4.1.0",
+		"zod": "^3.24.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.14",
+		"@types/bun": "^1.3.8",
+		"@types/js-yaml": "^4.0.9",
+		"@types/node": "^22.0.0"
+	}
+}

@@ -1,0 +1,22 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="prism" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0066FF"/>
+      <stop offset="100%" stop-color="#0052CC"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8"/>
+      <feOffset dx="0" dy="6" result="off"/>
+      <feFlood flood-color="#003D99" flood-opacity="0.22"/>
+      <feComposite in2="off" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="#FFFFFF"/>
+  <!-- prism: ~30% larger now, less padding -->
+  <g transform="translate(170 218) scale(1.31)" filter="url(#shadow)">
+    <path fill-rule="evenodd" clip-rule="evenodd"
+      d="M255.254 0L0 429H512L255.254 0ZM255.254 279.523V86.6969L83.5918 379.672L255.254 279.523Z"
+      fill="url(#prism)"/>
+  </g>
+</svg>

@@ -1,0 +1,34 @@
+name: Sample E-Commerce
+description: Basic user flow through an e-commerce site
+takeScreenshots: true
+flows:
+  - name: Homepage Browse
+    steps:
+      - action: navigate
+        url: /
+        screenshot: homepage
+      - action: wait
+        ms: 1000
+      - action: screenshot
+        name: homepage-loaded
+      - action: click
+        selector: 'nav a:first-child'
+      - action: wait
+        ms: 500
+      - action: screenshot
+        name: after-nav-click
+  - name: Product Search
+    steps:
+      - action: navigate
+        url: /products
+      - action: click
+        selector: '.search-input'
+      - action: wait
+        ms: 300
+      - action: type
+        selector: '.search-input'
+        value: 'widget'
+      - action: wait
+        ms: 500
+      - action: screenshot
+        name: search-results
