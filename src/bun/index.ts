@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -7,10 +8,22 @@ import {
 	BrowserWindow,
 	Utils,
 } from "electrobun/bun";
-import type { ScenarioRunnerRPC } from "../lib/rpc";
+import type { RnSnapInfo, ScenarioRunnerRPC } from "../lib/rpc";
 import { validateDeviceConfig, validateScenario } from "../lib/schemas";
+import {
+	type CaptureProjectEntry,
+	initProject,
+	loadCaptureProjects,
+} from "./init";
 import { captureRect } from "./screencapture";
+import {
+	createSnapOrchestrator,
+	type SnapOrchestrator,
+	type SnapRecord,
+} from "./snap-orchestrator";
+import { startSnapServer } from "./snap-server";
 import { resolveSource } from "./sources";
+import { uploadSession } from "./upload";
 
 const DBG_LOG = "/tmp/prisma-debug.log";
 const dbg = (m: string) => {
@@ -53,6 +66,74 @@ function screenshotsDir(): string {
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 	return dir;
 }
+
+// Default RN snap output. Sticks the snaps inside the user's Documents so they
+// survive between runs and across app reinstalls.
+function snapOutDir(): string {
+	const env = process.env.SNAP_OUT;
+	if (env && env.length > 0) return resolve(env);
+	const dir = join(homedir(), "Documents", "UnicornCapture", "snaps");
+	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+const SNAP_PORT = Number(process.env.SNAP_PORT ?? 9876);
+const snapServer = startSnapServer({ port: SNAP_PORT, log: dbg });
+let snapOrch: SnapOrchestrator | null = null;
+async function ensureOrchestrator(): Promise<SnapOrchestrator> {
+	if (!snapOrch) {
+		snapOrch = await createSnapOrchestrator({
+			server: snapServer,
+			outDir: snapOutDir(),
+		});
+		dbg(`snap session ${snapOrch.sessionId} → ${snapOrch.outDir}`);
+	}
+	return snapOrch;
+}
+function findProjectForBridge(projectId: string): CaptureProjectEntry | null {
+	if (!projectId) return null;
+	const list = loadCaptureProjects();
+	return list.find((p) => p.slug === projectId) ?? null;
+}
+
+async function autoUpload(
+	orch: SnapOrchestrator,
+	snap: SnapRecord,
+): Promise<RnSnapInfo["uploaded"]> {
+	const project = findProjectForBridge(snap.projectId);
+	const url = project?.uploadUrl ?? process.env.SNAP_UPLOAD_URL;
+	const token = project?.projectToken ?? process.env.SNAP_UPLOAD_TOKEN;
+	if (!url || !token) return undefined;
+	const session = orch.getSession();
+	const partial = { ...session, snaps: [snap] };
+	const result = await uploadSession({
+		url,
+		token,
+		outDir: orch.outDir,
+		session: partial,
+		log: dbg,
+	});
+	if (result.ok) {
+		dbg(`uploaded ${snap.image} → ${url} build ${result.buildId.slice(0, 8)}`);
+		return { ok: true, buildId: result.buildId };
+	}
+	dbg(`upload failed for ${snap.image}: ${result.error}`);
+	return { ok: false, error: result.error };
+}
+
+function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
+	return {
+		sequence: s.sequence,
+		projectId: s.projectId,
+		route: s.route,
+		navStack: s.navStack,
+		stateHash: s.stateHash,
+		capturedAt: s.capturedAt,
+		imagePath: join(outDir, s.image),
+	};
+}
+// Boot the orchestrator eagerly so the view's first status poll has a sessionId.
+void ensureOrchestrator();
 
 let currentSourceCleanup: (() => void) | null = null;
 function freeCurrentSource(): void {
@@ -137,6 +218,79 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				return {
 					devicesYaml: read("samples/devices.yaml"),
 					scenarioYaml: read("samples/scenarios.yaml"),
+				};
+			},
+			snapServerStatus: async () => {
+				const orch = await ensureOrchestrator();
+				return {
+					port: SNAP_PORT,
+					clientCount: snapServer.clientCount(),
+					projects: snapServer
+						.clients()
+						.map((c) => c.projectId)
+						.filter(Boolean),
+					sessionId: orch.sessionId,
+					snaps: orch.listSnaps().map((s) => snapToInfo(s, orch.outDir)),
+				};
+			},
+			performSnap: async () => {
+				const orch = await ensureOrchestrator();
+				if (snapServer.clientCount() === 0) {
+					return {
+						ok: false,
+						error:
+							"No snap-bridge connected. Start your RN app with @unicorn-studio/snap-bridge installed.",
+					};
+				}
+				const r = await orch.snap();
+				if (!r.ok) return { ok: false, error: r.error };
+				const info = snapToInfo(r.record, orch.outDir);
+				try {
+					info.uploaded = await autoUpload(orch, r.record);
+				} catch (err) {
+					info.uploaded = { ok: false, error: (err as Error).message };
+				}
+				return { ok: true, snap: info };
+			},
+			resetSnapSession: async () => {
+				snapOrch = null;
+				const orch = await ensureOrchestrator();
+				return { ok: true, sessionId: orch.sessionId };
+			},
+			pickRepoPath: async () => {
+				try {
+					const paths = await Utils.openFileDialog({
+						canChooseFiles: false,
+						canChooseDirectory: true,
+						allowsMultipleSelection: false,
+						allowedFileTypes: "*",
+					});
+					if (!paths.length || !paths[0]) {
+						return { ok: false, error: "No folder selected" };
+					}
+					return { ok: true, path: paths[0] };
+				} catch (e: any) {
+					return { ok: false, error: e?.message || "Picker failed" };
+				}
+			},
+			listProjects: async () => ({ projects: loadCaptureProjects() }),
+			initProject: async (input) => {
+				const result = await initProject(input);
+				if (!result.ok) {
+					return { ok: false, error: result.error, steps: result.steps };
+				}
+				return {
+					ok: true,
+					slug: result.slug,
+					name: result.name,
+					platform: result.platform,
+					projectToken: result.projectToken,
+					uploadUrl: result.uploadUrl,
+					workspaceRoot: result.workspaceRoot,
+					rnAppDir: result.rnAppDir,
+					layoutPath: result.layoutPath,
+					layoutInjection: result.layoutInjection,
+					steps: result.steps,
 				};
 			},
 		},

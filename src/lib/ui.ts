@@ -16,8 +16,30 @@ export const UI = {
 				icon: "📁",
 				placeholder: "Drop folder or archive (.zip / .tar.gz)",
 			},
+			{
+				key: "iossim",
+				label: "iOS Sim",
+				icon: "📱",
+				placeholder: "Capture from a running iOS Simulator + snap-bridge",
+			},
 		] as const,
 		archiveExts: [".zip", ".tar", ".tar.gz", ".tgz"] as const,
+	},
+	rn: {
+		title: "iOS Simulator",
+		bridge: {
+			waiting: "Waiting for snap-bridge to connect…",
+			connected: "Bridge connected",
+			noBridge:
+				"No snap-bridge connected. In your RN app's root layout, install @unicorn-studio/snap-bridge and call installSnapBridge({projectId}) once. Then setSnapState({route, navStack}) on every nav change.",
+		},
+		snap: {
+			button: "📸 Snap",
+			busy: "Capturing…",
+			emptyHint:
+				"Press the button (or Cmd+Shift+S) to capture the current screen.",
+		},
+		recent: { title: "This session", empty: "No snaps yet — try one!" },
 	},
 	views: [
 		{ key: "steps", label: "Steps" },

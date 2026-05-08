@@ -1,6 +1,10 @@
 import { Electroview } from "electrobun/view";
 import type {
 	FlowResult,
+	RnInitOutcome,
+	RnInitStep,
+	RnProjectInfo,
+	RnSnapInfo,
 	RunResult,
 	ScenarioRunnerRPC,
 	SourceInput,
@@ -64,6 +68,47 @@ interface AppState {
 	expanded: Set<string>; // step uids that are expanded in editor
 	customViewport: { width: number; height: number } | null;
 	projectKey: string | null;
+	rn: {
+		clientCount: number;
+		projects: string[];
+		sessionId: string;
+		snaps: RnSnapInfo[];
+		busy: boolean;
+		error: string | null;
+		selectedIdx: number; // index into snaps[] for the focused thumbnail
+		registry: RnProjectInfo[]; // known projects from ~/Library/.../projects.json
+		wizard: WizardState;
+	};
+}
+
+interface WizardState {
+	open: boolean;
+	repoPath: string;
+	slug: string;
+	name: string;
+	platformUrl: string;
+	platform: "ios" | "android" | "web";
+	setupToken: string;
+	busy: boolean;
+	error: string | null;
+	steps: RnInitStep[];
+	manualSnippet: string | null;
+}
+
+function freshWizardState(): WizardState {
+	return {
+		open: false,
+		repoPath: "",
+		slug: "",
+		name: "",
+		platformUrl: "http://localhost:3010",
+		platform: "ios",
+		setupToken: "",
+		busy: false,
+		error: null,
+		steps: [],
+		manualSnippet: null,
+	};
 }
 
 interface ProjectState {
@@ -114,6 +159,17 @@ const state = new Store<AppState>({
 	expanded: new Set(),
 	customViewport: null,
 	projectKey: null,
+	rn: {
+		clientCount: 0,
+		projects: [],
+		sessionId: "",
+		snaps: [],
+		busy: false,
+		error: null,
+		selectedIdx: -1,
+		registry: [],
+		wizard: freshWizardState(),
+	},
 });
 
 // Auto-save scenarios+device per source when projectKey is set.
@@ -153,7 +209,7 @@ const electroview = new Electroview({ rpc });
 const req = (electroview.rpc as any).request;
 
 // ─── ATOMS (template fns, no inline styles) ───
-const cls = (...xs: (string | false | undefined | null)[]) =>
+const _cls = (...xs: (string | false | undefined | null)[]) =>
 	xs.filter(Boolean).join(" ");
 
 const tabs = (
@@ -507,7 +563,7 @@ function renderStepEditor(): string {
 			<div class="editor-head">
 				<button class="btn btn-primary btn-sm" data-act="add-flow">${esc(UI.actions.newFlow)}</button>
 			</div>
-			${empty(null, UI.labels.empty.noFlow + " — add a flow or click Record.")}`;
+			${empty(null, `${UI.labels.empty.noFlow} — add a flow or click Record.`)}`;
 	}
 
 	return `
@@ -744,6 +800,13 @@ function renderLogPanel(): string {
 let initialized = false;
 
 function render(): void {
+	const s = state.get();
+	if (s.source.kind === "iossim") {
+		renderRnMode();
+		return;
+	}
+	// Coming back from iOS Sim mode — DOM was replaced, rebuild from scratch.
+	if (!$(".layout")) initialized = false;
 	if (!initialized) {
 		const root = $("#app")!;
 		root.innerHTML = `${renderHeader()}<div class="layout">${renderSidebar()}<div class="splitter" data-split="sidebar-preview"></div>${buildPreviewShell()}<div class="splitter" data-split="preview-inspector"></div>${renderInspector()}</div>`;
@@ -1713,6 +1776,532 @@ function bindSplitters(): void {
 	});
 }
 
+// ─── iOS SIMULATOR (RN snap) MODE ───
+//
+// A separate top-level layout that replaces the web-mode chrome entirely.
+// We keep the same source-kind tabs as a header strip so the user can swap
+// back to URL/Local without losing context. Polls snapServerStatus every
+// 500ms while active so the bridge connection light reflects reality.
+
+function renderRnMode(): void {
+	const s = state.get();
+	const root = $("#app")!;
+	const r = s.rn;
+	const selected = r.snaps[r.selectedIdx] ?? r.snaps[r.snaps.length - 1];
+	const tabsHtml = tabs(
+		UI.source.kinds.map((k) => ({ key: k.key, label: k.label })),
+		s.source.kind,
+		"data-src-tab",
+	);
+	const bridgeHtml =
+		r.clientCount > 0
+			? `<div class="rn-status connected">
+					<span class="dot success"></span>
+					<div>
+						<div class="rn-status-title">${UI.rn.bridge.connected}</div>
+						<div class="rn-status-sub">${r.projects.map(esc).join(", ") || "(unnamed project)"}</div>
+					</div>
+				</div>`
+			: `<div class="rn-status waiting">
+					<span class="dot warn"></span>
+					<div>
+						<div class="rn-status-title">${UI.rn.bridge.waiting}</div>
+						<div class="rn-status-sub">port ${SNAP_PORT_TEXT}</div>
+					</div>
+				</div>`;
+
+	const snapBtnDisabled = r.busy || r.clientCount === 0;
+	const snapBtnLabel = r.busy ? UI.rn.snap.busy : UI.rn.snap.button;
+	const previewHtml = selected
+		? `<div class="rn-preview-stage">
+				<img src="${esc(toFileUrl(selected.imagePath))}" alt="${esc(selected.route)}" class="rn-preview-img">
+				<div class="rn-preview-meta">
+					<div class="rn-preview-route">${esc(selected.route)}</div>
+					<div class="rn-preview-sub">#${selected.sequence} · ${esc(selected.stateHash)} · ${new Date(selected.capturedAt).toLocaleTimeString()}</div>
+				</div>
+			</div>`
+		: `<div class="rn-preview-empty">${UI.rn.snap.emptyHint}</div>`;
+
+	const recentHtml = r.snaps.length
+		? `<div class="rn-recent-grid">
+				${r.snaps
+					.slice()
+					.reverse()
+					.map(
+						(snap) => `
+					<button class="rn-thumb${selected && snap.sequence === selected.sequence ? " active" : ""}" data-rn-select="${snap.sequence}" title="${esc(snap.route)}">
+						<img src="${esc(toFileUrl(snap.imagePath))}" alt="">
+						<div class="rn-thumb-label">
+							<span class="rn-thumb-seq">#${snap.sequence}</span>
+							<span class="rn-thumb-route">${esc(routeShortLabel(snap))}</span>
+						</div>
+					</button>`,
+					)
+					.join("")}
+			</div>`
+		: `<div class="rn-recent-empty">${UI.rn.recent.empty}</div>`;
+
+	const projectListHtml = renderProjectList(r);
+	const wizardHtml = r.wizard.open ? renderWizardModal(r.wizard) : "";
+
+	root.innerHTML = `
+		<header class="header">
+			<h1><img src="logo.svg" class="brand-mark" alt=""><span class="brand-wordmark">${esc(UI.app.name)}</span></h1>
+			<div class="header-actions">
+				<button class="btn btn-ghost btn-icon btn-sm" data-act="theme" title="Toggle theme">${UI.actions.theme}</button>
+				<button class="btn btn-ghost btn-sm" data-act="rn-reset" title="Start a new session" ${r.snaps.length === 0 ? "disabled" : ""}>↻ New session</button>
+				<button class="btn btn-primary" data-act="rn-snap" ${snapBtnDisabled ? "disabled" : ""}>${snapBtnLabel}</button>
+			</div>
+		</header>
+		<div class="rn-layout">
+			<aside class="rn-sidebar">
+				<div class="section">
+					${sectionHeader(UI.labels.source)}
+					${tabsHtml}
+				</div>
+				<div class="section">
+					${sectionHeader("Projects", [{ label: "+ Add", act: "rn-wizard-open", title: "Add a new project" }])}
+					${projectListHtml}
+				</div>
+				<div class="section">
+					${sectionHeader(UI.rn.title)}
+					${bridgeHtml}
+					${
+						r.clientCount === 0
+							? `<p class="rn-hint">${UI.rn.bridge.noBridge}</p>`
+							: ""
+					}
+				</div>
+				${
+					r.error
+						? `<div class="section">${banner("error", r.error)}</div>`
+						: ""
+				}
+				<div class="section rn-session">
+					${sectionHeader(UI.rn.recent.title, [{ label: "Open folder", act: "rn-reveal", title: "Reveal session in Finder" }])}
+					<div class="rn-session-meta">
+						<div class="rn-session-id">${esc(r.sessionId || "—")}</div>
+						<div class="rn-session-count">${r.snaps.length} snap${r.snaps.length === 1 ? "" : "s"}</div>
+					</div>
+				</div>
+			</aside>
+			<main class="rn-main">${previewHtml}</main>
+			<aside class="rn-recent">
+				<div class="rn-recent-header">${UI.rn.recent.title}</div>
+				${recentHtml}
+			</aside>
+		</div>`;
+
+	// Source tabs (so user can switch back to URL/Local)
+	$$("[data-src-tab]").forEach((el) =>
+		el.addEventListener("click", () => {
+			const kind = el.getAttribute("data-src-tab") as SourceKind;
+			state.set((cur) => ({
+				...cur,
+				source: { ...cur.source, kind },
+				error: null,
+			}));
+		}),
+	);
+	$("[data-act=theme]")?.addEventListener("click", () => {
+		theme.toggle();
+	});
+	$("[data-act=rn-snap]")?.addEventListener("click", () => {
+		void doSnap();
+	});
+	$("[data-act=rn-reset]")?.addEventListener("click", async () => {
+		try {
+			await req.resetSnapSession({});
+			state.set((cur) => ({
+				...cur,
+				rn: {
+					...cur.rn,
+					snaps: [],
+					selectedIdx: -1,
+					error: null,
+				},
+			}));
+			log("Snap session reset", "info");
+		} catch (e: any) {
+			log(`Reset failed: ${e?.message || e}`, "error");
+		}
+	});
+	$$("[data-rn-select]").forEach((el) =>
+		el.addEventListener("click", () => {
+			const seq = Number(el.getAttribute("data-rn-select"));
+			state.set((cur) => ({
+				...cur,
+				rn: {
+					...cur.rn,
+					selectedIdx: cur.rn.snaps.findIndex((sn) => sn.sequence === seq),
+				},
+			}));
+		}),
+	);
+	$("[data-act=rn-wizard-open]")?.addEventListener("click", () => openWizard());
+	bindWizardEvents();
+
+	if (wizardHtml) {
+		const modalRoot = document.createElement("div");
+		modalRoot.innerHTML = wizardHtml;
+		root.appendChild(modalRoot);
+		bindWizardEvents();
+	}
+}
+
+function renderProjectList(r: AppState["rn"]): string {
+	if (r.registry.length === 0) {
+		return `<div class="rn-projects-empty">No projects yet. Click <b>+ Add</b> to onboard one.</div>`;
+	}
+	return `<div class="rn-projects">
+		${r.registry
+			.map((p) => {
+				const active = r.projects.includes(p.slug);
+				return `<div class="rn-project ${active ? "active" : ""}" title="${esc(p.uploadUrl)}">
+					<span class="dot ${active ? "success" : "muted"}"></span>
+					<div class="rn-project-meta">
+						<div class="rn-project-name">${esc(p.name || p.slug)}</div>
+						<div class="rn-project-slug">${esc(p.slug)}</div>
+					</div>
+				</div>`;
+			})
+			.join("")}
+	</div>`;
+}
+
+function renderWizardModal(w: WizardState): string {
+	const stepsHtml = w.steps
+		.map((s) => {
+			const icon =
+				s.kind === "ok"
+					? "✓"
+					: s.kind === "warn"
+						? "!"
+						: s.kind === "error"
+							? "✗"
+							: "·";
+			return `<div class="rn-wizard-step rn-wizard-step-${s.kind}"><span>${icon}</span> ${esc(s.message)}</div>`;
+		})
+		.join("");
+	const manualHtml = w.manualSnippet
+		? `<div class="rn-wizard-manual">
+				<div class="rn-wizard-manual-title">Couldn't auto-edit your root layout — paste this snippet:</div>
+				<pre class="rn-wizard-snippet">${esc(w.manualSnippet)}</pre>
+			</div>`
+		: "";
+	return `
+		<div class="rn-modal-backdrop" data-act="rn-wizard-close-bg">
+			<div class="rn-modal" data-act="rn-modal-stop">
+				<div class="rn-modal-header">
+					<div class="rn-modal-title">Add project</div>
+					<button class="btn btn-ghost btn-sm" data-act="rn-wizard-close">×</button>
+				</div>
+				<div class="rn-modal-body">
+					<label class="rn-field">
+						<span>Repo path</span>
+						<div class="rn-field-row">
+							<input class="input" type="text" data-rn-input="repoPath" placeholder="/path/to/customer-repo" value="${esc(w.repoPath)}" ${w.busy ? "disabled" : ""}>
+							<button class="btn btn-secondary btn-sm" data-act="rn-wizard-pick" ${w.busy ? "disabled" : ""}>Browse…</button>
+						</div>
+					</label>
+					<label class="rn-field">
+						<span>Slug</span>
+						<input class="input" type="text" data-rn-input="slug" placeholder="acme-fitness" value="${esc(w.slug)}" ${w.busy ? "disabled" : ""}>
+					</label>
+					<label class="rn-field">
+						<span>Display name</span>
+						<input class="input" type="text" data-rn-input="name" placeholder="Acme Fitness" value="${esc(w.name)}" ${w.busy ? "disabled" : ""}>
+					</label>
+					<label class="rn-field">
+						<span>Platform URL</span>
+						<input class="input" type="text" data-rn-input="platformUrl" value="${esc(w.platformUrl)}" ${w.busy ? "disabled" : ""}>
+					</label>
+					<label class="rn-field">
+						<span>Setup token</span>
+						<input class="input" type="password" data-rn-input="setupToken" placeholder="setup_…" value="${esc(w.setupToken)}" ${w.busy ? "disabled" : ""}>
+					</label>
+					${w.error ? `<div class="rn-wizard-error">${esc(w.error)}</div>` : ""}
+					${w.steps.length ? `<div class="rn-wizard-steps">${stepsHtml}</div>` : ""}
+					${manualHtml}
+				</div>
+				<div class="rn-modal-footer">
+					<button class="btn btn-ghost" data-act="rn-wizard-close" ${w.busy ? "disabled" : ""}>Cancel</button>
+					<button class="btn btn-primary" data-act="rn-wizard-submit" ${w.busy ? "disabled" : ""}>${w.busy ? "Setting up…" : "Setup project →"}</button>
+				</div>
+			</div>
+		</div>`;
+}
+
+function openWizard(): void {
+	state.set((cur) => ({
+		...cur,
+		rn: { ...cur.rn, wizard: { ...freshWizardState(), open: true } },
+	}));
+}
+
+function closeWizard(): void {
+	state.set((cur) => ({
+		...cur,
+		rn: { ...cur.rn, wizard: { ...cur.rn.wizard, open: false } },
+	}));
+}
+
+function setWizardField<K extends keyof WizardState>(
+	key: K,
+	value: WizardState[K],
+): void {
+	state.set((cur) => ({
+		...cur,
+		rn: { ...cur.rn, wizard: { ...cur.rn.wizard, [key]: value } },
+	}));
+}
+
+function bindWizardEvents(): void {
+	$("[data-act=rn-wizard-close]")?.addEventListener("click", closeWizard);
+	$("[data-act=rn-wizard-close-bg]")?.addEventListener("click", (e) => {
+		// only close when the backdrop itself is clicked (not its modal children)
+		if (e.target === e.currentTarget) closeWizard();
+	});
+	$("[data-act=rn-modal-stop]")?.addEventListener("click", (e) =>
+		e.stopPropagation(),
+	);
+	$$("[data-rn-input]").forEach((el) => {
+		const key = el.getAttribute("data-rn-input") as keyof WizardState;
+		el.addEventListener("input", () => {
+			setWizardField(
+				key,
+				(el as HTMLInputElement).value as WizardState[typeof key],
+			);
+		});
+	});
+	$("[data-act=rn-wizard-pick]")?.addEventListener("click", async () => {
+		try {
+			const r = await req.pickRepoPath({});
+			if (!r.ok) return;
+			const path = r.path;
+			// Auto-fill slug from basename if empty
+			const cur = state.get().rn.wizard;
+			const auto = path
+				.split("/")
+				.filter(Boolean)
+				.pop()!
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "-")
+				.replace(/^-|-$/g, "");
+			state.set((curState) => ({
+				...curState,
+				rn: {
+					...curState.rn,
+					wizard: {
+						...curState.rn.wizard,
+						repoPath: path,
+						slug: cur.slug || auto,
+						name:
+							cur.name ||
+							auto.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+					},
+				},
+			}));
+		} catch (err: any) {
+			setWizardField("error", err?.message || String(err));
+		}
+	});
+	$("[data-act=rn-wizard-submit]")?.addEventListener("click", async () => {
+		const w = state.get().rn.wizard;
+		if (!w.repoPath || !w.slug || !w.platformUrl || !w.setupToken) {
+			setWizardField(
+				"error",
+				"Repo path, slug, platform URL and setup token are required.",
+			);
+			return;
+		}
+		state.set((cur) => ({
+			...cur,
+			rn: {
+				...cur.rn,
+				wizard: {
+					...cur.rn.wizard,
+					busy: true,
+					error: null,
+					steps: [],
+					manualSnippet: null,
+				},
+			},
+		}));
+		try {
+			const result: RnInitOutcome = await req.initProject({
+				repoPath: w.repoPath,
+				slug: w.slug,
+				name: w.name || w.slug,
+				platform: w.platform,
+				platformUrl: w.platformUrl,
+				setupToken: w.setupToken,
+			});
+			state.set((cur) => ({
+				...cur,
+				rn: {
+					...cur.rn,
+					wizard: {
+						...cur.rn.wizard,
+						busy: false,
+						steps: result.steps ?? [],
+						error: result.ok ? null : (result.error ?? "Unknown error"),
+						manualSnippet:
+							result.ok && result.layoutInjection?.mode === "manual"
+								? result.layoutInjection.snippet
+								: null,
+					},
+				},
+			}));
+			if (result.ok) {
+				log(`✓ Project "${result.slug}" set up`, "success");
+				await refreshProjectRegistry();
+				if (result.layoutInjection?.mode !== "manual") {
+					setTimeout(closeWizard, 1500);
+				}
+			} else {
+				log(`Setup failed: ${result.error}`, "error");
+			}
+		} catch (err: any) {
+			state.set((cur) => ({
+				...cur,
+				rn: {
+					...cur.rn,
+					wizard: {
+						...cur.rn.wizard,
+						busy: false,
+						error: err?.message || String(err),
+					},
+				},
+			}));
+			log(`RPC failed: ${err?.message || err}`, "error");
+		}
+	});
+}
+
+async function refreshProjectRegistry(): Promise<void> {
+	try {
+		const r = await req.listProjects({});
+		state.set((cur) => ({
+			...cur,
+			rn: { ...cur.rn, registry: r.projects },
+		}));
+	} catch {
+		// ignore — sidebar just stays empty
+	}
+}
+
+const SNAP_PORT_TEXT = "9876";
+
+function toFileUrl(absPath: string): string {
+	return `file://${absPath.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function routeShortLabel(snap: RnSnapInfo): string {
+	const stack = snap.navStack ?? [];
+	const parts = stack.filter(
+		(seg) => seg && !seg.startsWith("(") && !seg.startsWith("["),
+	);
+	if (parts.length === 0) return stack.length === 0 ? "welcome" : "home";
+	return parts.join("/");
+}
+
+async function doSnap(): Promise<void> {
+	if (state.get().rn.busy) return;
+	state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: true, error: null } }));
+	try {
+		const r = await req.performSnap({});
+		if (r.ok) {
+			state.set((cur) => ({
+				...cur,
+				rn: {
+					...cur.rn,
+					snaps: [...cur.rn.snaps, r.snap],
+					selectedIdx: cur.rn.snaps.length, // newest one
+					busy: false,
+				},
+			}));
+			log(`✓ #${r.snap.sequence} ${r.snap.route}`, "success");
+		} else {
+			state.set((cur) => ({
+				...cur,
+				rn: { ...cur.rn, busy: false, error: r.error },
+			}));
+			log(r.error, "error");
+		}
+	} catch (e: any) {
+		const msg = e?.message || String(e);
+		state.set((cur) => ({
+			...cur,
+			rn: { ...cur.rn, busy: false, error: msg },
+		}));
+		log(`Snap RPC failed: ${msg}`, "error");
+	}
+}
+
+let rnPollTimer: ReturnType<typeof setInterval> | null = null;
+function ensureRnPolling(): void {
+	if (rnPollTimer) return;
+	rnPollTimer = setInterval(async () => {
+		if (state.get().source.kind !== "iossim") {
+			if (rnPollTimer) {
+				clearInterval(rnPollTimer);
+				rnPollTimer = null;
+			}
+			return;
+		}
+		try {
+			const status = await req.snapServerStatus({});
+			state.set((cur) => {
+				// Only diff fields that come from the server, leave selectedIdx + busy alone.
+				const same =
+					cur.rn.clientCount === status.clientCount &&
+					cur.rn.projects.join("|") === status.projects.join("|") &&
+					cur.rn.sessionId === status.sessionId &&
+					cur.rn.snaps.length === status.snaps.length;
+				if (same) return cur;
+				const nextIdx =
+					cur.rn.selectedIdx === -1 && status.snaps.length > 0
+						? status.snaps.length - 1
+						: cur.rn.selectedIdx;
+				return {
+					...cur,
+					rn: {
+						...cur.rn,
+						clientCount: status.clientCount,
+						projects: status.projects,
+						sessionId: status.sessionId,
+						snaps: status.snaps,
+						selectedIdx: Math.min(nextIdx, status.snaps.length - 1),
+					},
+				};
+			});
+		} catch {
+			// transient — keep polling
+		}
+	}, 500);
+}
+state.subscribe((s) => {
+	if (s.source.kind === "iossim") {
+		ensureRnPolling();
+		if (s.rn.registry.length === 0) void refreshProjectRegistry();
+	}
+});
+
+// Cmd+Shift+S → snap (only when in RN mode)
+window.addEventListener("keydown", (e) => {
+	if (
+		(e.metaKey || e.ctrlKey) &&
+		e.shiftKey &&
+		(e.key === "s" || e.key === "S")
+	) {
+		if (state.get().source.kind === "iossim") {
+			e.preventDefault();
+			void doSnap();
+		}
+	}
+});
+
 theme.init();
 state.subscribe(() => render());
 
@@ -1723,7 +2312,7 @@ log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
 	try {
 		const cfg = await req.getConfig({});
 		log(
-			`Config received — devices.yaml: ${cfg.devicesYaml ? cfg.devicesYaml.length + "B" : "EMPTY"}, scenarios.yaml: ${cfg.scenarioYaml ? cfg.scenarioYaml.length + "B" : "EMPTY"}`,
+			`Config received — devices.yaml: ${cfg.devicesYaml ? `${cfg.devicesYaml.length}B` : "EMPTY"}, scenarios.yaml: ${cfg.scenarioYaml ? `${cfg.scenarioYaml.length}B` : "EMPTY"}`,
 		);
 		if (cfg.devicesYaml) {
 			const dr = validateDeviceConfig(cfg.devicesYaml);

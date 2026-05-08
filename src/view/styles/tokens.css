@@ -173,7 +173,7 @@ a {
 
 /* ── ATOMS / UTILITIES ── */
 .hidden {
-	display: none !important;
+	display: none;
 }
 .row {
 	display: flex;
@@ -230,14 +230,14 @@ a {
 	color: var(--fg-0);
 }
 .btn-danger {
-	color: var(--err) !important;
+	color: var(--err);
 }
 .btn-danger:hover {
-	background: rgba(248, 113, 113, 0.1) !important;
+	background: rgba(248, 113, 113, 0.1);
 }
 .btn-danger-solid {
-	background: var(--err) !important;
-	color: #fff !important;
+	background: var(--err);
+	color: #fff;
 }
 .btn-danger-solid:hover:not(:disabled) {
 	filter: brightness(1.1);
