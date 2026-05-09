@@ -20,7 +20,9 @@ import {
 	validateDeviceConfig,
 	validateScenario,
 } from "../lib/schemas";
+import { icon, type IconName } from "../lib/icon";
 import { Store } from "../lib/store";
+import { openWizardV2 } from "./wizard-v2";
 import {
 	type LogLevel,
 	type SourceKind,
@@ -249,9 +251,37 @@ function showToast(msg: string, level: LogLevel): void {
 
 // ─── RPC ───
 // 10 min timeout — covers user-interactive RPCs (file picker), source extraction, full runs.
+// `onInitProgress` is streamed from the bun-side installer per step
+// transition. We fan it out to whichever wizard instance is currently
+// open via `progressListeners` (`subscribeInstallProgress`).
+const progressListeners = new Set<
+	(msg: import("../lib/rpc").InstallProgressMessage) => void
+>();
+function subscribeInstallProgress(
+	handler: (msg: import("../lib/rpc").InstallProgressMessage) => void,
+): () => void {
+	progressListeners.add(handler);
+	return () => {
+		progressListeners.delete(handler);
+	};
+}
+
 const rpc = Electroview.defineRPC<ScenarioRunnerRPC>({
 	maxRequestTime: 600000,
-	handlers: { requests: {}, messages: {} },
+	handlers: {
+		requests: {},
+		messages: {
+			onInitProgress: (msg: import("../lib/rpc").InstallProgressMessage) => {
+				for (const l of progressListeners) {
+					try {
+						l(msg);
+					} catch (err) {
+						console.error("progress listener crashed:", err);
+					}
+				}
+			},
+		},
+	},
 });
 const electroview = new Electroview({ rpc });
 const req = (electroview.rpc as any).request;
@@ -1871,6 +1901,20 @@ let dashSearchQuery = "";
 const gtbActions = document.getElementById("gtb-actions")!;
 gtbActions.replaceChildren();
 
+// Replace the search icon placeholder (✕ in HTML) with a Lucide SVG.
+const gtbSearchIcon = document.querySelector<HTMLElement>(".gtb-search-icon");
+if (gtbSearchIcon) gtbSearchIcon.replaceChildren(icon("search", { size: 14 }));
+
+// Helper: button with leading icon + text. Used by every action button so
+// the topbar reads as a row of consistently-spaced icon+label pills.
+function setBtnIcon(
+	btn: HTMLButtonElement,
+	name: IconName,
+	label: string,
+): void {
+	btn.replaceChildren(icon(name, { size: 14 }), document.createTextNode(label));
+}
+
 // Brand button → return to dashboard.
 const gtbBrand = document.getElementById("gtb-brand") as HTMLButtonElement;
 gtbBrand.addEventListener("click", () => leaveProject());
@@ -1885,42 +1929,43 @@ gtbSearchInput.addEventListener("input", () => {
 // Dashboard action: Add project (opens type chooser).
 const gtbAddBtn = document.createElement("button");
 gtbAddBtn.className = "btn btn-primary btn-sm mode-dashboard";
-gtbAddBtn.textContent = "+ Add";
 gtbAddBtn.title = "Onboard a new project";
+setBtnIcon(gtbAddBtn, "plus", "Add");
 gtbAddBtn.addEventListener("click", () => openAddTypeChooser());
 
-// Always-on: theme.
+// Always-on: theme. Icon swaps based on current theme.
 const gtbThemeBtn = document.createElement("button");
 gtbThemeBtn.className = "btn btn-ghost btn-icon btn-sm";
 gtbThemeBtn.title = "Toggle theme";
-gtbThemeBtn.textContent = UI.actions.theme;
+gtbThemeBtn.appendChild(icon(theme.get() === "dark" ? "sun-medium" : "moon", { size: 14 }));
 gtbThemeBtn.addEventListener("click", () => {
 	const next = theme.toggle();
+	gtbThemeBtn.replaceChildren(icon(next === "dark" ? "sun-medium" : "moon", { size: 14 }));
 	log(`Theme: ${next}`, "info");
 });
 
 // Project-view actions (mobile = iOS Sim).
 const gtbBackBtn = document.createElement("button");
 gtbBackBtn.className = "btn btn-ghost btn-sm mode-project";
-gtbBackBtn.textContent = "← Back";
 gtbBackBtn.title = "Back to dashboard";
+setBtnIcon(gtbBackBtn, "arrow-left", "Back");
 gtbBackBtn.addEventListener("click", () => leaveProject());
 
 const gtbNewSessionBtn = document.createElement("button");
 gtbNewSessionBtn.className = "btn btn-ghost btn-sm mode-mobile";
 gtbNewSessionBtn.title = "Start a new session";
-gtbNewSessionBtn.textContent = "↻ New session";
+setBtnIcon(gtbNewSessionBtn, "rotate-ccw", "New session");
 gtbNewSessionBtn.addEventListener("click", () => void doResetSession());
 
 const gtbPushBtn = document.createElement("button");
 gtbPushBtn.className = "btn btn-secondary mode-project";
 gtbPushBtn.title = "Upload pending snaps to the gallery platform";
-gtbPushBtn.textContent = "↑ Push to web";
+setBtnIcon(gtbPushBtn, "upload", "Push to web");
 gtbPushBtn.addEventListener("click", () => void doPushPending());
 
 const gtbSnapBtn = document.createElement("button");
 gtbSnapBtn.className = "btn btn-primary mode-project";
-gtbSnapBtn.textContent = UI.rn.snap.button;
+setBtnIcon(gtbSnapBtn, "camera", "Snap");
 gtbSnapBtn.addEventListener("click", () => void doSnap());
 
 gtbActions.append(
@@ -1953,20 +1998,21 @@ state.subscribe((s) => {
 		: r.snaps;
 	gtbSnapBtn.disabled = r.clientCount === 0 || r.busy;
 	gtbSnapBtn.classList.toggle("is-busy", r.busy);
-	gtbSnapBtn.textContent = r.busy ? UI.rn.snap.busy : UI.rn.snap.button;
+	setBtnIcon(gtbSnapBtn, r.busy ? "loader" : "camera", r.busy ? "Capturing…" : "Snap");
 	gtbNewSessionBtn.disabled = r.snaps.length === 0 || r.busy;
 	const projectName =
 		(slug && r.registry.find((p) => p.slug === slug)?.name) || slug;
 	const hasAny = projectSnaps.length > 0;
 	gtbPushBtn.disabled = r.pushing || r.busy || !hasAny;
 	gtbPushBtn.classList.toggle("is-busy", r.pushing);
-	gtbPushBtn.textContent = r.pushing
+	const pushLabel = r.pushing
 		? `Pushing… (${projectSnaps.length})`
 		: hasAny
 			? projectName
-				? `↑ Push ${projectSnaps.length} to ${projectName}`
-				: `↑ Push ${projectSnaps.length} to web`
+				? `Push ${projectSnaps.length} to ${projectName}`
+				: `Push ${projectSnaps.length} to web`
 			: "Nothing to push";
+	setBtnIcon(gtbPushBtn, r.pushing ? "loader" : "upload", pushLabel);
 });
 syncGlobalTopbar();
 
@@ -2083,7 +2129,7 @@ function buildRnLayout(): RnRefs {
 	sidebarCollapseBtn.type = "button";
 	sidebarCollapseBtn.title = "Collapse sidebar";
 	sidebarCollapseBtn.setAttribute("aria-label", "Collapse sidebar");
-	sidebarCollapseBtn.textContent = "«";
+	sidebarCollapseBtn.appendChild(icon("panel-left-close", { size: 14 }));
 	sidebarCollapseBtn.addEventListener("click", () => {
 		layout.classList.add("rn-layout-collapsed");
 		saveSidebarCollapsed(true);
@@ -2093,7 +2139,7 @@ function buildRnLayout(): RnRefs {
 	sidebarExpandBtn.type = "button";
 	sidebarExpandBtn.title = "Show sidebar";
 	sidebarExpandBtn.setAttribute("aria-label", "Show sidebar");
-	sidebarExpandBtn.textContent = "»";
+	sidebarExpandBtn.appendChild(icon("panel-left-open", { size: 14 }));
 	sidebarExpandBtn.addEventListener("click", () => {
 		layout.classList.remove("rn-layout-collapsed");
 		saveSidebarCollapsed(false);
@@ -2108,7 +2154,7 @@ function buildRnLayout(): RnRefs {
 	rightCollapseBtn.type = "button";
 	rightCollapseBtn.title = "Collapse context panel";
 	rightCollapseBtn.setAttribute("aria-label", "Collapse context panel");
-	rightCollapseBtn.textContent = "»";
+	rightCollapseBtn.appendChild(icon("panel-right-close", { size: 14 }));
 	rightCollapseBtn.addEventListener("click", () => {
 		layout.classList.add("rn-layout-rcollapsed");
 		saveRightPanelCollapsed(true);
@@ -2118,7 +2164,7 @@ function buildRnLayout(): RnRefs {
 	rightExpandBtn.type = "button";
 	rightExpandBtn.title = "Show context panel";
 	rightExpandBtn.setAttribute("aria-label", "Show context panel");
-	rightExpandBtn.textContent = "«";
+	rightExpandBtn.appendChild(icon("panel-right-open", { size: 14 }));
 	rightExpandBtn.addEventListener("click", () => {
 		layout.classList.remove("rn-layout-rcollapsed");
 		saveRightPanelCollapsed(false);
@@ -2306,7 +2352,22 @@ function buildRnLayout(): RnRefs {
 	// ── EVENT WIRING (once) ──
 	// Source tabs + global action buttons (theme/run/snap/push/new session)
 	// live in #global-topbar (index.html); their listeners are wired in init.
-	projectsAddBtn.addEventListener("click", () => openWizard());
+	projectsAddBtn.addEventListener("click", () => {
+		// New 4-phase stepper. The old single-page wizard (openWizard) is
+		// still defined below as a fallback while we shake the new flow out.
+		openWizardV2({
+			req: {
+				pickRepoPath: req.pickRepoPath,
+				detectRepo: req.detectRepo,
+				runInstaller: req.runInstaller,
+			},
+			subscribeProgress: subscribeInstallProgress,
+			log,
+			readLocal,
+			writeLocal,
+			refreshProjectRegistry,
+		});
+	});
 
 	modalCloseBtn.addEventListener("click", () => closeWizard());
 	modalCancelBtn.addEventListener("click", () => closeWizard());
@@ -2454,11 +2515,14 @@ function buildDashboard(): DashRefs {
 
 	const cardsGrid = ce("div", "dash-grid");
 	const emptyState = ce("div", "dash-empty");
-	emptyState.innerHTML = `
-		<div class="dash-empty-icon" aria-hidden="true">📁</div>
-		<div class="dash-empty-title">No projects yet</div>
-		<div class="dash-empty-body">Click <b>+ Add</b> to onboard your first project — Mobile (iOS Sim) or Web.</div>
-	`;
+	const emptyIcon = ce("div", "dash-empty-icon");
+	emptyIcon.appendChild(icon("folder", { size: 36, strokeWidth: 1.5 }));
+	const emptyTitle = ce("div", "dash-empty-title");
+	emptyTitle.textContent = "No projects yet";
+	const emptyBody = ce("div", "dash-empty-body");
+	emptyBody.innerHTML =
+		"Click <b>+ Add</b> to onboard your first project — Mobile (iOS Sim) or Web.";
+	emptyState.append(emptyIcon, emptyTitle, emptyBody);
 
 	inner.append(heading, cardsGrid, emptyState);
 	root.appendChild(inner);
@@ -2553,31 +2617,47 @@ function openAddTypeChooser(): void {
 	const tiles = document.createElement("div");
 	tiles.className = "dash-type-tiles";
 
-	const mobileTile = document.createElement("button");
-	mobileTile.type = "button";
-	mobileTile.className = "dash-type-tile";
-	mobileTile.innerHTML = `
-		<div class="dash-type-icon">📱</div>
-		<div class="dash-type-name">Mobile</div>
-		<div class="dash-type-sub">iOS Simulator + snap-bridge from your RN app.</div>
-	`;
-	mobileTile.addEventListener("click", () => {
-		close();
-		openWizard();
-	});
+	const mkTile = (
+		iconName: IconName,
+		name: string,
+		sub: string,
+		onClick: () => void,
+	): HTMLButtonElement => {
+		const t = document.createElement("button");
+		t.type = "button";
+		t.className = "dash-type-tile";
+		const iconWrap = document.createElement("div");
+		iconWrap.className = "dash-type-icon";
+		iconWrap.appendChild(icon(iconName, { size: 22, strokeWidth: 1.5 }));
+		const nameEl = document.createElement("div");
+		nameEl.className = "dash-type-name";
+		nameEl.textContent = name;
+		const subEl = document.createElement("div");
+		subEl.className = "dash-type-sub";
+		subEl.textContent = sub;
+		t.append(iconWrap, nameEl, subEl);
+		t.addEventListener("click", onClick);
+		return t;
+	};
 
-	const webTile = document.createElement("button");
-	webTile.type = "button";
-	webTile.className = "dash-type-tile";
-	webTile.innerHTML = `
-		<div class="dash-type-icon">🌐</div>
-		<div class="dash-type-name">Web</div>
-		<div class="dash-type-sub">Any web app — paste a URL and capture screens from the live page.</div>
-	`;
-	webTile.addEventListener("click", () => {
-		close();
-		openAddWebForm();
-	});
+	const mobileTile = mkTile(
+		"smartphone",
+		"Mobile",
+		"iOS Simulator + snap-bridge from your RN app.",
+		() => {
+			close();
+			openWizard();
+		},
+	);
+	const webTile = mkTile(
+		"globe",
+		"Web",
+		"Any web app — paste a URL and capture screens from the live page.",
+		() => {
+			close();
+			openAddWebForm();
+		},
+	);
 
 	tiles.append(mobileTile, webTile);
 
@@ -2756,15 +2836,15 @@ function buildWebLayout(): WebRefs {
 	const urlBar = ce("div", "web-urlbar");
 	const reloadBtn = ce("button", "btn btn-ghost btn-icon btn-sm");
 	reloadBtn.title = "Reload";
-	reloadBtn.textContent = "↻";
+	reloadBtn.appendChild(icon("refresh-cw", { size: 14 }));
 	const urlInput = ce("input", "input web-url-input");
 	urlInput.type = "url";
 	urlInput.placeholder = "https://your-app.example.com/";
 	const loadBtn = ce("button", "btn btn-secondary btn-sm");
 	loadBtn.textContent = "Load";
 	const snapBtn = ce("button", "btn btn-primary btn-sm");
-	snapBtn.textContent = UI.rn.snap.button;
 	snapBtn.title = "Snap the current page (system coming soon)";
+	snapBtn.append(icon("camera", { size: 14 }), document.createTextNode("Snap"));
 	urlBar.append(reloadBtn, urlInput, loadBtn, snapBtn);
 
 	const stage = ce("div", "web-stage");
@@ -2800,10 +2880,13 @@ function buildWebLayout(): WebRefs {
 	const sourceDropzone = ce("div", "dropzone");
 	sourceDropzone.dataset.srcDrop = "";
 	sourceDropzone.dataset.srcKind = "local";
-	sourceDropzone.innerHTML = `
-		<div class="dropzone-icon">📁</div>
-		<div class="dropzone-text">Drop folder or archive (.zip / .tar.gz)</div>
-		<div class="dropzone-hint">or click to browse</div>`;
+	const dropIcon = ce("div", "dropzone-icon");
+	dropIcon.appendChild(icon("folder", { size: 28, strokeWidth: 1.5 }));
+	const dropText = ce("div", "dropzone-text");
+	dropText.textContent = "Drop folder or archive (.zip / .tar.gz)";
+	const dropHint = ce("div", "dropzone-hint");
+	dropHint.textContent = "or click to browse";
+	sourceDropzone.append(dropIcon, dropText, dropHint);
 	sourceSection.append(
 		sourceSectionTitle,
 		sourceUrlInput,
@@ -4312,7 +4395,7 @@ function renderSidebarFlowTree(
 
 		if (depth > 0) {
 			const arrow = ce("span", "rn-flow-arrow");
-			arrow.textContent = "↳";
+			arrow.appendChild(icon("corner-down-right", { size: 12 }));
 			row.appendChild(arrow);
 		}
 
