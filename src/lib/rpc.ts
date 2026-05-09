@@ -89,6 +89,55 @@ export interface RnInitStep {
 	message: string;
 }
 
+/**
+ * Result of `detectRepo` — a read-only snapshot of a repo's setup state
+ * before the wizard touches anything. Drives the new wizard's Phase 1
+ * "we found:" card and the Plan preview.
+ */
+export interface RepoFingerprint {
+	repoPath: string;
+	workspaceRoot: string;
+	isMonorepo: boolean;
+	packageManager: "npm" | "pnpm" | "yarn" | "bun";
+	candidates: Array<{
+		rnAppDir: string;
+		relativeFromRepo: string;
+		hasAppFolder: boolean;
+		packageJsonName: string | null;
+	}>;
+	picked: {
+		rnAppDir: string;
+		relativeFromRepo: string;
+		hasAppFolder: boolean;
+		packageJsonName: string | null;
+	} | null;
+	pickedNotFoundReason?: string;
+	rnLayout: "expo-router" | "rn-cli" | "expo-classic" | "unknown";
+	snapBridge:
+		| { state: "missing"; suggested: string }
+		| { state: "floating"; current: string; suggested: string }
+		| {
+				state: "pinned";
+				current: string;
+				matchesSuggested: boolean;
+				suggested: string;
+		  };
+	viewShot: { installed: boolean; podsInstalled: boolean };
+	layoutFile: {
+		path: string | null;
+		wiringState: "absent" | "wired" | "ast-unsupported";
+		componentShape:
+			| "function-decl"
+			| "memo-arrow"
+			| "forwardRef"
+			| "default-export-only"
+			| "unknown";
+	};
+	flowsFile: { path: string | null; lastModified: string | null };
+	hookFile: { path: string | null };
+	iosWorkspace: { exists: boolean; podfileLockExists: boolean };
+}
+
 export interface RnInitOutcome {
 	ok: boolean;
 	error?: string;
@@ -171,7 +220,7 @@ export type ScenarioRunnerRPC = {
 				};
 			};
 			performSnap: {
-				params: Record<string, never>;
+				params: { projectSlug?: string };
 				response:
 					| {
 							ok: true;
@@ -260,6 +309,12 @@ export type ScenarioRunnerRPC = {
 			pickRepoPath: {
 				params: Record<string, never>;
 				response: { ok: true; path: string } | { ok: false; error: string };
+			};
+			detectRepo: {
+				params: { repoPath: string };
+				response:
+					| { ok: true; fingerprint: RepoFingerprint }
+					| { ok: false; error: string };
 			};
 			listProjects: {
 				params: Record<string, never>;

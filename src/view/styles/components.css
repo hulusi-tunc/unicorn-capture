@@ -1,3 +1,102 @@
+/* ── GLOBAL TOPBAR ── persistent app chrome: brand + source tabs + actions.
+   Lives in index.html so it survives mode switches without being torn down. */
+#global-topbar {
+	flex-shrink: 0;
+	display: grid;
+	grid-template-columns: 1fr auto 1fr;
+	align-items: center;
+	gap: var(--space-3);
+	height: 60px;
+	padding: 0 var(--space-5);
+	background: var(--bg-0);
+	border-bottom: 1px solid var(--border);
+	-webkit-app-region: drag;
+	font-family: var(--font);
+	z-index: 50;
+}
+.gtb-brand {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+.gtb-brand-mark {
+	width: 28px;
+	height: 28px;
+	flex-shrink: 0;
+}
+.gtb-brand-name {
+	font-weight: 600;
+	font-size: 15px;
+	letter-spacing: -0.01em;
+	color: var(--fg-0);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.gtb-tabs {
+	-webkit-app-region: no-drag;
+	display: inline-flex;
+	gap: 0;
+	padding: 3px;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	justify-self: center;
+}
+.gtb-tab {
+	-webkit-app-region: no-drag;
+	height: 26px;
+	min-width: 72px;
+	padding: 0 14px;
+	border: 0;
+	border-radius: 999px;
+	background: transparent;
+	color: var(--fg-1);
+	font-family: var(--font);
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.gtb-tab:hover:not(.active) {
+	background: var(--bg-2);
+	color: var(--fg-0);
+}
+.gtb-tab.active {
+	background: var(--accent);
+	color: #fff;
+}
+.gtb-actions {
+	-webkit-app-region: no-drag;
+	display: inline-flex;
+	gap: var(--space-1);
+	justify-self: end;
+}
+
+/* Mode-aware action buttons inside the topbar */
+body[data-mode="iossim"] .mode-url-local { display: none; }
+body[data-mode="web"] .mode-iossim { display: none; }
+
+/* "or" divider between URL input and the dropzone in the merged Web mode. */
+.src-divider {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 12px 0 8px;
+	color: var(--fg-3);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.04em;
+}
+.src-divider::before,
+.src-divider::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: var(--border);
+}
+
 /* ── HEADER ── matches the web platform's DashboardTopNav (60px, hairline border, surface backdrop) */
 .header {
 	display: flex;
@@ -22,6 +121,24 @@
 	gap: var(--space-1);
 	-webkit-app-region: no-drag;
 }
+
+/* Source tabs in header — centered between brand and actions, no-drag so
+   the buttons stay clickable on top of the macOS title-bar drag region. */
+.header-source-tabs {
+	-webkit-app-region: no-drag;
+	margin: 0 auto;
+	padding: 3px;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	gap: 0;
+}
+.header-source-tabs .tab {
+	height: 26px;
+	min-width: 64px;
+	padding: 0 14px;
+}
+
 
 /* ── LAYOUT (floating panes) ──
  * Each pane is a rounded card sitting on the page bg, with a small gap
@@ -1100,17 +1217,143 @@ kbd {
 /* ───────────────────────────────────────────────────────────────────────── */
 
 .rn-root {
-	position: fixed;
-	inset: 0;
+	flex: 1;
+	min-height: 0;
 	display: flex;
 	flex-direction: column;
+}
+
+/* ───────────────────────────────────────────────────────────────────────── */
+/* Web mode — mirrors iOS Sim's editorial 3-column shell.                    */
+/* Center: URL bar + iframe + filmstrip.                                     */
+/* ───────────────────────────────────────────────────────────────────────── */
+.web-root {
+	flex: 1;
 	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+.web-layout {
+	flex: 1;
+	display: grid;
+	grid-template-columns: 260px 1fr 280px;
+	min-height: 0;
+	padding: 12px;
+	gap: 10px;
+	background: var(--bg-1);
+	background-image: var(--surface-img);
+	background-size: 16px 16px;
+}
+.web-sidebar,
+.web-rightpanel {
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+	display: flex;
+	flex-direction: column;
+	overflow-y: auto;
+	min-width: 0;
+}
+.web-sidebar .section-title {
+	padding: 16px 16px 8px;
+	font-family: var(--font-mono);
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+}
+.web-sidebar .rn-flows-side {
+	padding: 0 8px 16px;
+}
+.web-rightpanel .section {
+	padding: var(--space-4);
+	border-bottom: 1px solid var(--border);
+}
+.web-rightpanel .section:last-child {
+	border-bottom: none;
+}
+.web-main {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-width: 0;
+	min-height: 0;
+}
+.web-urlbar {
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 10px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+}
+.web-url-input {
+	flex: 1;
+	height: 32px;
+	font-size: 12px;
+	font-family: var(--font-mono);
+}
+.web-stage {
+	flex: 1;
+	min-height: 0;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+	overflow: hidden;
+	position: relative;
+}
+.web-iframe {
+	width: 100%;
+	height: 100%;
+	border: 0;
+	background: #fff;
+	display: block;
+}
+.web-filmstrip-wrap {
+	flex-shrink: 0;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+	padding: 12px 14px;
+}
+.web-filmstrip-label {
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+	margin-bottom: 8px;
+}
+.web-filmstrip {
+	display: flex;
+	gap: 8px;
+	overflow-x: auto;
+	min-height: 64px;
+	align-items: center;
+	padding-bottom: 4px;
+}
+.web-filmstrip-empty {
+	font-size: 12px;
+	color: var(--fg-3);
+	padding: 12px 8px;
+	width: 100%;
+	text-align: center;
+	border: 1px dashed var(--border);
+	border-radius: 8px;
 }
 
 .rn-layout {
 	flex: 1;
 	display: grid;
-	grid-template-columns: 280px 1fr;
+	grid-template-columns: 260px 1fr 280px;
 	min-height: 0;
 	padding: 12px;
 	gap: 10px;
@@ -1120,10 +1363,16 @@ kbd {
 	transition: grid-template-columns 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .rn-layout-collapsed {
-	grid-template-columns: 0 1fr;
-	gap: 0;
+	grid-template-columns: 0 1fr 280px;
 }
-.rn-layout-collapsed .rn-sidebar {
+.rn-layout-rcollapsed {
+	grid-template-columns: 260px 1fr 0;
+}
+.rn-layout-collapsed.rn-layout-rcollapsed {
+	grid-template-columns: 0 1fr 0;
+}
+.rn-layout-collapsed .rn-sidebar,
+.rn-layout-rcollapsed .rn-rightpanel {
 	border: 0;
 	box-shadow: none;
 	opacity: 0;
@@ -1131,10 +1380,77 @@ kbd {
 	min-width: 0;
 	width: 0;
 }
-.rn-layout-collapsed .rn-sidebar-expand {
+.rn-layout-collapsed .rn-sidebar-expand,
+.rn-layout-rcollapsed .rn-rightpanel-expand {
 	display: inline-flex;
 }
-.rn-sidebar-expand { display: none; }
+.rn-sidebar-expand,
+.rn-rightpanel-expand { display: none; }
+
+/* Right panel — same card shell as sidebar, mirrored chrome */
+.rn-rightpanel {
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+	display: flex;
+	flex-direction: column;
+	overflow-y: auto;
+	min-width: 0;
+}
+.rn-rightpanel .section {
+	padding: var(--space-4);
+	border-bottom: 1px solid var(--border);
+}
+.rn-rightpanel .section:last-child {
+	border-bottom: none;
+}
+.rn-rightpanel-collapse {
+	position: sticky;
+	top: 0;
+	align-self: flex-start;
+	z-index: 2;
+	margin: 8px auto 0 8px;
+	width: 24px;
+	height: 24px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-2);
+	font-size: 13px;
+	line-height: 1;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.rn-rightpanel-collapse:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
+.rn-rightpanel-expand {
+	position: absolute;
+	top: 14px;
+	right: 14px;
+	z-index: 3;
+	width: 28px;
+	height: 28px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-1);
+	box-shadow: var(--shadow-sm);
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	align-items: center;
+	justify-content: center;
+}
+.rn-rightpanel-expand:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
 
 /* Sidebar collapse / expand chrome — sticky toggle in the corner */
 .rn-sidebar-collapse {

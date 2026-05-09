@@ -320,18 +320,9 @@ const stepThumb = (label: string, src?: string) => `
 	</div>`;
 
 // ─── HEADER ───
+// Brand + actions live in #global-topbar (see index.html); no per-mode header.
 function renderHeader(): string {
-	const s = state.get();
-	const canRun =
-		!!s.baseUrl && !!s.devices.length && (currentFlow()?.steps.length ?? 0) > 0;
-	return `
-		<header class="header">
-			<h1><img src="logo.svg" class="brand-mark" alt=""><span class="brand-wordmark">${esc(UI.app.name)}</span></h1>
-			<div class="header-actions">
-				<button class="btn btn-ghost btn-icon btn-sm" data-act="theme" title="Toggle theme">${UI.actions.theme}</button>
-				<button class="btn btn-primary" data-act="run" ${canRun ? "" : "disabled"}>${UI.actions.run}</button>
-			</div>
-		</header>`;
+	return "";
 }
 
 // ─── SIDEBAR ───
@@ -343,12 +334,9 @@ function renderSidebar(): string {
 			<div class="scrollable">
 				<div class="section">
 					${sectionHeader(UI.labels.source)}
-					${tabs(
-						UI.source.kinds.map((k) => ({ key: k.key, label: k.label })),
-						s.source.kind,
-						"data-src-tab",
-					)}
-					${s.source.kind === "url" ? renderUrlInput(s.source.url) : renderDropzone(s.source.kind, s.source.path)}
+					${renderUrlInput(s.source.kind === "url" ? s.source.url : "")}
+					<div class="src-divider"><span>or drop a folder / archive</span></div>
+					${renderDropzone(s.source.kind === "local" ? "local" : "local", s.source.kind === "local" ? s.source.path : "")}
 					${s.entry ? `<div class="entry-point">${UI.labels.entryArrow} ${esc(s.entry)}</div>` : ""}
 					${s.baseUrl ? banner("success", `${UI.labels.liveAt} ${s.baseUrl}`) : ""}
 					${s.error ? banner("error", s.error) : ""}
@@ -850,14 +838,24 @@ let initialized = false;
 function render(): void {
 	const s = state.get();
 	const inIosSim = s.source.kind === "iossim";
+	const inWeb = s.source.kind === "url" || s.source.kind === "local";
 
-	// iossim lives in its own persistent #rn-root tree. Toggle visibility
-	// instead of rebuilding — listeners stay alive across mode switches.
+	// iossim and web each live in persistent roots — toggle visibility
+	// instead of rebuilding so listeners and iframe state survive switches.
 	ensureRnMounted();
+	ensureWebMounted();
 	setRnVisible(inIosSim);
-	setAppVisible(!inIosSim);
+	setWebVisible(inWeb);
+	// Hide the legacy #app entirely — replaced by #web-root.
+	setAppVisible(false);
+	// Drive header action visibility (Snap/Push vs Run) off the source kind.
+	document.body.dataset.mode = s.source.kind;
 	if (inIosSim) {
 		applyRnState(s);
+		return;
+	}
+	if (inWeb) {
+		applyWebState(s);
 		return;
 	}
 
@@ -1831,6 +1829,104 @@ function bindSplitters(): void {
 }
 
 theme.init();
+
+// ── GLOBAL TOPBAR ──
+// Lives in index.html so it survives mode switches without any renderer
+// tearing it down. Brand+tabs are static; the actions slot is populated
+// here once and shown/hidden per-mode via classes on `body[data-mode]`.
+// "Web" is a parent tab covering both URL and Local sub-modes. The internal
+// state.source.kind stays the granular value; the topbar groups them so the
+// user sees one mode for "load a web project from anywhere".
+const isWebKind = (k: SourceKind): boolean => k === "url" || k === "local";
+
+function syncGlobalTopbar(): void {
+	const kind = state.get().source.kind;
+	const tabs = document.querySelectorAll<HTMLButtonElement>(".gtb-tab");
+	for (const t of tabs) {
+		const target = t.dataset.gtbSrc;
+		const active =
+			target === "web" ? isWebKind(kind) : target === kind;
+		t.classList.toggle("active", active);
+	}
+	// data-mode collapses the two web sub-kinds into one — CSS targets it.
+	document.body.dataset.mode = isWebKind(kind) ? "web" : kind;
+}
+for (const t of document.querySelectorAll<HTMLButtonElement>(".gtb-tab")) {
+	t.addEventListener("click", () => {
+		const target = t.dataset.gtbSrc;
+		if (target === "web") {
+			// Default sub-mode is URL when entering Web tab from iOS Sim.
+			// If already on a web sub-kind, leave it alone.
+			if (!isWebKind(state.get().source.kind)) switchSource("url");
+			return;
+		}
+		if (target === "iossim") switchSource("iossim");
+	});
+}
+
+// Build the actions slot once, then show/hide groups via CSS on body[data-mode].
+const gtbActions = document.getElementById("gtb-actions")!;
+const gtbThemeBtn = document.createElement("button");
+gtbThemeBtn.className = "btn btn-ghost btn-icon btn-sm";
+gtbThemeBtn.title = "Toggle theme";
+gtbThemeBtn.textContent = UI.actions.theme;
+gtbThemeBtn.addEventListener("click", () => {
+	const next = theme.toggle();
+	log(`Theme: ${next}`, "info");
+});
+// URL/Local: Run scenario.
+const gtbRunBtn = document.createElement("button");
+gtbRunBtn.className = "btn btn-primary mode-url-local";
+gtbRunBtn.textContent = UI.actions.run;
+gtbRunBtn.addEventListener("click", () => void handleRun());
+// iOS Sim: New session, Push, Snap.
+const gtbNewSessionBtn = document.createElement("button");
+gtbNewSessionBtn.className = "btn btn-ghost btn-sm mode-iossim";
+gtbNewSessionBtn.title = "Start a new session";
+gtbNewSessionBtn.textContent = "↻ New session";
+gtbNewSessionBtn.addEventListener("click", () => void doResetSession());
+const gtbPushBtn = document.createElement("button");
+gtbPushBtn.className = "btn btn-secondary mode-iossim";
+gtbPushBtn.title = "Upload pending snaps to the gallery platform";
+gtbPushBtn.textContent = "↑ Push to web";
+gtbPushBtn.addEventListener("click", () => void doPushPending());
+const gtbSnapBtn = document.createElement("button");
+gtbSnapBtn.className = "btn btn-primary mode-iossim";
+gtbSnapBtn.textContent = UI.rn.snap.button;
+gtbSnapBtn.addEventListener("click", () => void doSnap());
+gtbActions.append(gtbThemeBtn, gtbRunBtn, gtbNewSessionBtn, gtbPushBtn, gtbSnapBtn);
+
+// Re-run sync on every state change so URL/Local/iOS Sim tabs and Snap/Push
+// disabled+busy states stay in lockstep with the underlying state.
+state.subscribe(syncGlobalTopbar);
+state.subscribe((s) => {
+	const r = s.rn;
+	const slug = r.selectedProjectSlug;
+	const projectSnaps = slug
+		? r.snaps.filter((n) => n.projectId === slug)
+		: r.snaps;
+	gtbSnapBtn.disabled = r.clientCount === 0 || r.busy;
+	gtbSnapBtn.classList.toggle("is-busy", r.busy);
+	gtbSnapBtn.textContent = r.busy ? UI.rn.snap.busy : UI.rn.snap.button;
+	gtbNewSessionBtn.disabled = r.snaps.length === 0 || r.busy;
+	const projectName =
+		(slug && r.registry.find((p) => p.slug === slug)?.name) || slug;
+	const hasAny = projectSnaps.length > 0;
+	gtbPushBtn.disabled = r.pushing || r.busy || !hasAny;
+	gtbPushBtn.classList.toggle("is-busy", r.pushing);
+	gtbPushBtn.textContent = r.pushing
+		? `Pushing… (${projectSnaps.length})`
+		: hasAny
+			? projectName
+				? `↑ Push ${projectSnaps.length} to ${projectName}`
+				: `↑ Push ${projectSnaps.length} to web`
+			: "Nothing to push";
+	const canRun =
+		!!s.baseUrl && !!s.devices.length && (currentFlow()?.steps.length ?? 0) > 0;
+	gtbRunBtn.disabled = !canRun;
+});
+syncGlobalTopbar();
+
 state.subscribe(() => render());
 
 log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
@@ -1869,12 +1965,6 @@ log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
 
 interface RnRefs {
 	root: HTMLDivElement;
-	header: HTMLElement;
-	headerSnapBtn: HTMLButtonElement;
-	headerPushBtn: HTMLButtonElement;
-	headerNewSessionBtn: HTMLButtonElement;
-	sourceTabsBox: HTMLDivElement;
-	sourceTabBtns: { url: HTMLButtonElement; local: HTMLButtonElement; iossim: HTMLButtonElement };
 	projectsList: HTMLDivElement;
 	projectsAddBtn: HTMLButtonElement;
 	flowsList: HTMLDivElement;
@@ -1934,29 +2024,7 @@ function buildRnLayout(): RnRefs {
 	root.id = "rn-root";
 	root.style.display = "none"; // hidden until iossim mode
 
-	// ── HEADER ──
-	const header = ce("header", "header");
-	const h1 = ce("h1");
-	const brandImg = ce("img", "brand-mark");
-	brandImg.src = "logo.svg";
-	brandImg.alt = "";
-	const brandName = ce("span", "brand-wordmark");
-	brandName.textContent = UI.app.name;
-	h1.append(brandImg, brandName);
-	const headerActions = ce("div", "header-actions");
-	const headerThemeBtn = ce("button", "btn btn-ghost btn-icon btn-sm");
-	headerThemeBtn.title = "Toggle theme";
-	headerThemeBtn.textContent = UI.actions.theme;
-	const headerNewSessionBtn = ce("button", "btn btn-ghost btn-sm");
-	headerNewSessionBtn.title = "Start a new session";
-	headerNewSessionBtn.textContent = "↻ New session";
-	const headerPushBtn = ce("button", "btn btn-secondary");
-	headerPushBtn.title = "Upload pending snaps to the gallery platform";
-	headerPushBtn.textContent = "↑ Push to web";
-	const headerSnapBtn = ce("button", "btn btn-primary");
-	headerSnapBtn.textContent = UI.rn.snap.button;
-	headerActions.append(headerThemeBtn, headerNewSessionBtn, headerPushBtn, headerSnapBtn);
-	header.append(h1, headerActions);
+	// Brand + actions live in #global-topbar (index.html); rn-root is body only.
 
 	// ── LAYOUT ──
 	const layout = ce("div", "rn-layout");
@@ -1988,21 +2056,30 @@ function buildRnLayout(): RnRefs {
 		saveSidebarCollapsed(false);
 	});
 
-	// Source section
-	const sourceSection = ce("div", "section");
-	const sourceTitle = ce("div", "section-title row");
-	const sourceTitleSpan = ce("span");
-	sourceTitleSpan.textContent = UI.labels.source;
-	sourceTitle.appendChild(sourceTitleSpan);
-	const sourceTabsBox = ce("div", "tabs");
-	const tabBtnUrl = ce("button", "tab");
-	tabBtnUrl.textContent = "URL";
-	const tabBtnLocal = ce("button", "tab");
-	tabBtnLocal.textContent = "Local";
-	const tabBtnIosSim = ce("button", "tab active");
-	tabBtnIosSim.textContent = "iOS Sim";
-	sourceTabsBox.append(tabBtnUrl, tabBtnLocal, tabBtnIosSim);
-	sourceSection.append(sourceTitle, sourceTabsBox);
+	// Right context panel ("where am I capturing from"): source, projects,
+	// bridge status, session info. Mirrors the web's right rail.
+	const rightPanel = ce("aside", "rn-rightpanel");
+	if (loadRightPanelCollapsed()) layout.classList.add("rn-layout-rcollapsed");
+
+	const rightCollapseBtn = ce("button", "rn-rightpanel-collapse");
+	rightCollapseBtn.type = "button";
+	rightCollapseBtn.title = "Collapse context panel";
+	rightCollapseBtn.setAttribute("aria-label", "Collapse context panel");
+	rightCollapseBtn.textContent = "»";
+	rightCollapseBtn.addEventListener("click", () => {
+		layout.classList.add("rn-layout-rcollapsed");
+		saveRightPanelCollapsed(true);
+	});
+
+	const rightExpandBtn = ce("button", "rn-rightpanel-expand");
+	rightExpandBtn.type = "button";
+	rightExpandBtn.title = "Show context panel";
+	rightExpandBtn.setAttribute("aria-label", "Show context panel");
+	rightExpandBtn.textContent = "«";
+	rightExpandBtn.addEventListener("click", () => {
+		layout.classList.remove("rn-layout-rcollapsed");
+		saveRightPanelCollapsed(false);
+	});
 
 	// Projects section
 	const projectsSection = ce("div", "section");
@@ -2055,19 +2132,30 @@ function buildRnLayout(): RnRefs {
 	sessionMeta.append(sessionIdText, sessionCountText);
 	sessionSection.append(sessionTitle, sessionMeta);
 
-	sidebar.append(sidebarCollapseBtn, sourceSection, projectsSection, flowsSection, bridgeSection, sessionSection);
+	// LEFT sidebar: just the flows tree. Primary navigation, mirrors web.
+	sidebar.append(sidebarCollapseBtn, flowsSection);
+
+	// RIGHT panel: capture context (projects / bridge / session). Source
+	// tabs moved to the top header — they're app-level mode, not context.
+	rightPanel.append(
+		rightCollapseBtn,
+		projectsSection,
+		bridgeSection,
+		sessionSection,
+	);
 
 	// MAIN — snap grid card. previewBox is kept as the main scroller; we
 	// populate it with a grid of snap cards in applyRnState (no separate
 	// "preview" + "recent" split anymore).
 	const main = ce("main", "rn-main");
 	main.appendChild(sidebarExpandBtn);
+	main.appendChild(rightExpandBtn);
 	const previewBox = ce("div", "rn-grid-scroll");
 	main.appendChild(previewBox);
 	const recentBox = previewBox; // alias — same container, just renamed in refs
 
-	layout.append(sidebar, main);
-	root.append(header, layout);
+	layout.append(sidebar, main, rightPanel);
+	root.append(layout);
 
 	// ── MODAL (always in DOM, hidden by default) ──
 	const modalBackdrop = ce("div", "rn-modal-backdrop");
@@ -2145,12 +2233,6 @@ function buildRnLayout(): RnRefs {
 
 	const refs: RnRefs = {
 		root,
-		header,
-		headerSnapBtn,
-		headerPushBtn,
-		headerNewSessionBtn,
-		sourceTabsBox,
-		sourceTabBtns: { url: tabBtnUrl, local: tabBtnLocal, iossim: tabBtnIosSim },
 		projectsList,
 		projectsAddBtn,
 		flowsList,
@@ -2179,13 +2261,8 @@ function buildRnLayout(): RnRefs {
 	};
 
 	// ── EVENT WIRING (once) ──
-	tabBtnUrl.addEventListener("click", () => switchSource("url"));
-	tabBtnLocal.addEventListener("click", () => switchSource("local"));
-	tabBtnIosSim.addEventListener("click", () => switchSource("iossim"));
-	headerThemeBtn.addEventListener("click", () => theme.toggle());
-	headerNewSessionBtn.addEventListener("click", () => void doResetSession());
-	headerSnapBtn.addEventListener("click", () => void doSnap());
-	headerPushBtn.addEventListener("click", () => void doPushPending());
+	// Source tabs + global action buttons (theme/run/snap/push/new session)
+	// live in #global-topbar (index.html); their listeners are wired in init.
 	projectsAddBtn.addEventListener("click", () => openWizard());
 
 	modalCloseBtn.addEventListener("click", () => closeWizard());
@@ -2305,6 +2382,202 @@ function setAppVisible(visible: boolean): void {
 	if (app) app.style.display = visible ? "" : "none";
 }
 
+// ─── WEB MODE LAYOUT (URL / Local) ───
+// Mirrors the iOS Sim editorial shell: 3 columns + persistent center iframe.
+// Capture system is wired in a later pass; this is the UI scaffold.
+interface WebRefs {
+	root: HTMLDivElement;
+	urlInput: HTMLInputElement;
+	loadBtn: HTMLButtonElement;
+	reloadBtn: HTMLButtonElement;
+	snapBtn: HTMLButtonElement;
+	iframe: HTMLIFrameElement;
+	flowsList: HTMLDivElement;
+	filmstrip: HTMLDivElement;
+	sourceUrlInput: HTMLInputElement;
+	sourceLoadBtn: HTMLButtonElement;
+	sourceDropzone: HTMLDivElement;
+	sessionMeta: HTMLDivElement;
+}
+let webRefs: WebRefs | null = null;
+
+function buildWebLayout(): WebRefs {
+	const root = ce("div", "web-root");
+	root.id = "web-root";
+	root.style.display = "none";
+
+	const layout = ce("div", "web-layout");
+
+	// LEFT — flows tree (placeholder until system is wired)
+	const sidebar = ce("aside", "web-sidebar");
+	const flowsTitle = ce("div", "section-title");
+	flowsTitle.textContent = "Flows";
+	const flowsList = ce("div", "rn-flows-side");
+	const empty = ce("div", "rn-flows-side-empty");
+	empty.textContent = "No snaps yet — load a URL and snap to start.";
+	flowsList.appendChild(empty);
+	sidebar.append(flowsTitle, flowsList);
+
+	// MIDDLE — URL bar + iframe + filmstrip
+	const main = ce("main", "web-main");
+
+	const urlBar = ce("div", "web-urlbar");
+	const reloadBtn = ce("button", "btn btn-ghost btn-icon btn-sm");
+	reloadBtn.title = "Reload";
+	reloadBtn.textContent = "↻";
+	const urlInput = ce("input", "input web-url-input");
+	urlInput.type = "url";
+	urlInput.placeholder = "https://your-app.example.com/";
+	const loadBtn = ce("button", "btn btn-secondary btn-sm");
+	loadBtn.textContent = "Load";
+	const snapBtn = ce("button", "btn btn-primary btn-sm");
+	snapBtn.textContent = UI.rn.snap.button;
+	snapBtn.title = "Snap the current page (system coming soon)";
+	urlBar.append(reloadBtn, urlInput, loadBtn, snapBtn);
+
+	const stage = ce("div", "web-stage");
+	const iframe = ce("iframe", "web-iframe");
+	iframe.title = "Web preview";
+	stage.appendChild(iframe);
+
+	const filmstripWrap = ce("div", "web-filmstrip-wrap");
+	const filmstripLabel = ce("div", "web-filmstrip-label");
+	filmstripLabel.textContent = "Recent snaps";
+	const filmstrip = ce("div", "web-filmstrip");
+	const filmEmpty = ce("div", "web-filmstrip-empty");
+	filmEmpty.textContent = "No snaps yet.";
+	filmstrip.appendChild(filmEmpty);
+	filmstripWrap.append(filmstripLabel, filmstrip);
+
+	main.append(urlBar, stage, filmstripWrap);
+
+	// RIGHT — context (Source URL/dropzone, Project, Session)
+	const rightPanel = ce("aside", "web-rightpanel");
+	const sourceSection = ce("div", "section");
+	const sourceSectionTitle = ce("div", "section-title");
+	sourceSectionTitle.textContent = "Source";
+	const sourceUrlInput = ce("input", "input");
+	sourceUrlInput.type = "url";
+	sourceUrlInput.placeholder = "https://… or /local/path";
+	const sourceLoadBtn = ce("button", "btn btn-secondary btn-sm web-source-load");
+	sourceLoadBtn.textContent = "Load URL";
+	const sourceDivider = ce("div", "src-divider");
+	const sourceDividerSpan = ce("span");
+	sourceDividerSpan.textContent = "or drop a folder / archive";
+	sourceDivider.appendChild(sourceDividerSpan);
+	const sourceDropzone = ce("div", "dropzone");
+	sourceDropzone.dataset.srcDrop = "";
+	sourceDropzone.dataset.srcKind = "local";
+	sourceDropzone.innerHTML = `
+		<div class="dropzone-icon">📁</div>
+		<div class="dropzone-text">Drop folder or archive (.zip / .tar.gz)</div>
+		<div class="dropzone-hint">or click to browse</div>`;
+	sourceSection.append(
+		sourceSectionTitle,
+		sourceUrlInput,
+		sourceLoadBtn,
+		sourceDivider,
+		sourceDropzone,
+	);
+
+	const sessionSection = ce("div", "section");
+	const sessionTitle = ce("div", "section-title");
+	sessionTitle.textContent = "This session";
+	const sessionMeta = ce("div", "rn-session-meta");
+	const sessionId = ce("div", "rn-session-id");
+	sessionId.textContent = "—";
+	const sessionCount = ce("div", "rn-session-count");
+	sessionCount.textContent = "0 snaps";
+	sessionMeta.append(sessionId, sessionCount);
+	sessionSection.append(sessionTitle, sessionMeta);
+
+	rightPanel.append(sourceSection, sessionSection);
+
+	layout.append(sidebar, main, rightPanel);
+	root.appendChild(layout);
+
+	const refs: WebRefs = {
+		root,
+		urlInput,
+		loadBtn,
+		reloadBtn,
+		snapBtn,
+		iframe,
+		flowsList,
+		filmstrip,
+		sourceUrlInput,
+		sourceLoadBtn,
+		sourceDropzone,
+		sessionMeta,
+	};
+
+	// Wire URL bar + sidebar source: typing in either updates state.source.url;
+	// Load sets iframe.src directly (system replacement comes later).
+	const setUrl = (val: string): void => {
+		state.set((cur) => ({
+			...cur,
+			source: { ...cur.source, url: val, kind: "url" },
+		}));
+	};
+	const loadIframe = (): void => {
+		const u = state.get().source.url.trim();
+		if (!u) return;
+		iframe.src = u;
+	};
+	urlInput.addEventListener("input", () => setUrl(urlInput.value));
+	urlInput.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") loadIframe();
+	});
+	loadBtn.addEventListener("click", loadIframe);
+	reloadBtn.addEventListener("click", () => {
+		try {
+			iframe.src = iframe.src;
+		} catch {}
+	});
+	snapBtn.addEventListener("click", () => {
+		log("Web snap — capture system coming soon", "info");
+	});
+	sourceUrlInput.addEventListener("input", () => setUrl(sourceUrlInput.value));
+	sourceUrlInput.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") loadIframe();
+	});
+	sourceLoadBtn.addEventListener("click", loadIframe);
+
+	return refs;
+}
+
+function ensureWebMounted(): WebRefs {
+	if (!webRefs) {
+		webRefs = buildWebLayout();
+		document.body.appendChild(webRefs.root);
+	}
+	return webRefs;
+}
+
+function setWebVisible(visible: boolean): void {
+	if (!webRefs) return;
+	webRefs.root.style.display = visible ? "flex" : "none";
+}
+
+function applyWebState(s: AppState): void {
+	if (!webRefs) return;
+	const refs = webRefs;
+	// Keep URL inputs in sync without clobbering the user's caret position.
+	const url = s.source.url ?? "";
+	if (document.activeElement !== refs.urlInput && refs.urlInput.value !== url) {
+		refs.urlInput.value = url;
+	}
+	if (
+		document.activeElement !== refs.sourceUrlInput &&
+		refs.sourceUrlInput.value !== url
+	) {
+		refs.sourceUrlInput.value = url;
+	}
+	refs.loadBtn.disabled = !url.trim();
+	refs.reloadBtn.disabled = !refs.iframe.src;
+	refs.sourceLoadBtn.disabled = !url.trim();
+}
+
 function switchSource(kind: SourceKind): void {
 	state.set((cur) => ({
 		...cur,
@@ -2323,11 +2596,29 @@ function openWizard(): void {
 	rnRefs.modalRepoInput.value = "";
 	rnRefs.modalSlugInput.value = "";
 	rnRefs.modalNameInput.value = "";
-	if (!rnRefs.modalUrlInput.value)
-		rnRefs.modalUrlInput.value = "http://localhost:3010";
-	rnRefs.modalTokenInput.value = "";
+	// Pre-fill the platform URL + setup token from the last successful run.
+	// Both are typically identical across all projects in a workspace, so
+	// re-typing them every time is just friction.
+	const savedUrl = readLocal("capture.platformUrl");
+	const savedToken = readLocal("capture.setupToken");
+	rnRefs.modalUrlInput.value =
+		rnRefs.modalUrlInput.value || savedUrl || "http://localhost:3010";
+	rnRefs.modalTokenInput.value = savedToken;
 	setWizardBusy(false);
 	rnRefs.modalBackdrop.style.display = "flex";
+}
+
+function readLocal(key: string): string {
+	try {
+		return window.localStorage.getItem(key) ?? "";
+	} catch {
+		return "";
+	}
+}
+function writeLocal(key: string, value: string): void {
+	try {
+		window.localStorage.setItem(key, value);
+	} catch {}
 }
 
 function closeWizard(): void {
@@ -2400,6 +2691,11 @@ async function doSubmitWizard(): Promise<void> {
 			return;
 		}
 		log(`✓ Project "${result.slug}" set up`, "success");
+		// Remember the platform URL + setup token so the next "+ Add" run
+		// pre-fills both — they're typically identical across projects in
+		// the same workspace.
+		writeLocal("capture.platformUrl", platformUrl);
+		writeLocal("capture.setupToken", setupToken);
 		await refreshProjectRegistry();
 		const inj = result.layoutInjection;
 		if (inj && inj.mode === "manual") {
@@ -2435,7 +2731,9 @@ async function doSnap(): Promise<void> {
 	if (state.get().rn.busy) return; // double-click guard
 	state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: true } }));
 	try {
-		const r = await req.performSnap({});
+		const r = await req.performSnap({
+			projectSlug: state.get().rn.selectedProjectSlug ?? undefined,
+		});
 		if (!r.ok) {
 			log(r.error, "error");
 			return;
@@ -3042,40 +3340,8 @@ function applyRnState(s: AppState): void {
 		}
 	}
 
-	// Source tabs — highlight active
-	refs.sourceTabBtns.url.classList.toggle("active", s.source.kind === "url");
-	refs.sourceTabBtns.local.classList.toggle("active", s.source.kind === "local");
-	refs.sourceTabBtns.iossim.classList.toggle("active", s.source.kind === "iossim");
-
-	// Header buttons
-	refs.headerSnapBtn.disabled = r.clientCount === 0 || r.busy;
-	refs.headerSnapBtn.classList.toggle("is-busy", r.busy);
-	refs.headerSnapBtn.textContent = r.busy ? UI.rn.snap.busy : UI.rn.snap.button;
-	refs.headerNewSessionBtn.disabled = r.snaps.length === 0 || r.busy;
-	// Push is project-scoped when a project is selected — count + label
-	// reflect what will actually be sent.
-	const pushSnaps = r.selectedProjectSlug
-		? r.snaps.filter((s) => s.projectId === r.selectedProjectSlug)
-		: r.snaps;
-	const hasAnySnaps = pushSnaps.length > 0;
-	const projectName =
-		(r.selectedProjectSlug &&
-			r.registry.find((p) => p.slug === r.selectedProjectSlug)?.name) ||
-		r.selectedProjectSlug;
-	refs.headerPushBtn.disabled = r.pushing || r.busy || !hasAnySnaps;
-	refs.headerPushBtn.classList.toggle("is-busy", r.pushing);
-	refs.headerPushBtn.textContent = r.pushing
-		? `Pushing… (${pushSnaps.length})`
-		: hasAnySnaps
-			? projectName
-				? `↑ Push ${pushSnaps.length} to ${projectName}`
-				: `↑ Push ${pushSnaps.length} to web`
-			: "Nothing to push";
-	refs.headerPushBtn.title = hasAnySnaps
-		? projectName
-			? `Replace "${projectName}" web side with this desktop state`
-			: "Replace the web side with your current desktop state"
-		: "Take some snaps first";
+	// Source tabs + header action buttons (Snap/Push/New session) live in
+	// #global-topbar — their state is wired via state.subscribe in init.
 
 	// Bridge status
 	const connected = r.clientCount > 0;
@@ -3763,6 +4029,7 @@ function cssEscape(s: string): string {
 }
 
 const SIDEBAR_COLLAPSED_KEY = "prisma:sidebar-collapsed";
+const RIGHTPANEL_COLLAPSED_KEY = "prisma:rightpanel-collapsed";
 function loadSidebarCollapsed(): boolean {
 	try {
 		return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
@@ -3773,6 +4040,18 @@ function loadSidebarCollapsed(): boolean {
 function saveSidebarCollapsed(value: boolean): void {
 	try {
 		localStorage.setItem(SIDEBAR_COLLAPSED_KEY, value ? "1" : "0");
+	} catch {}
+}
+function loadRightPanelCollapsed(): boolean {
+	try {
+		return localStorage.getItem(RIGHTPANEL_COLLAPSED_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+function saveRightPanelCollapsed(value: boolean): void {
+	try {
+		localStorage.setItem(RIGHTPANEL_COLLAPSED_KEY, value ? "1" : "0");
 	} catch {}
 }
 

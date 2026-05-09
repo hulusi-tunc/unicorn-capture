@@ -165,8 +165,17 @@ body {
 		color 200ms var(--ease);
 }
 
+/* Body is a flex column so the persistent #global-topbar sits at the top
+   and the mode-specific bodies (#app for legacy, #rn-root for iOS Sim) take
+   the remaining vertical space. */
+body {
+	display: flex;
+	flex-direction: column;
+}
+
 #app {
-	height: 100vh;
+	flex: 1;
+	min-height: 0;
 	display: flex;
 	flex-direction: column;
 }

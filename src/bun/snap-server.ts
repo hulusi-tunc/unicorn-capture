@@ -65,16 +65,22 @@ export interface SnapServer {
 		ClientInfo,
 		"projectId" | "connectedAt" | "declaredFlows"
 	>[];
-	requestState(opts?: { timeoutMs?: number }): Promise<StateResponse>;
+	requestState(opts?: {
+		timeoutMs?: number;
+		/** Pin to a specific bridge by its slug; falls back to most-recent. */
+		projectId?: string;
+	}): Promise<StateResponse>;
 	/**
-	 * Ask the most-recently-connected bridge to capture its registered
-	 * SnapTarget as a base64 PNG (full content, not just viewport). Resolves
-	 * with the bytes; rejects when the bridge isn't connected, no target is
-	 * registered, react-native-view-shot is missing, or the request times
-	 * out. Capture-side caller should fall back to simctl in those cases.
+	 * Ask the most-recently-connected bridge (or the one matching `projectId`,
+	 * if pinned) to capture its registered SnapTarget as a base64 PNG (full
+	 * content, not just viewport). Resolves with the bytes; rejects when the
+	 * bridge isn't connected, no target is registered, react-native-view-shot
+	 * is missing, or the request times out. Capture-side caller should fall
+	 * back to simctl in those cases.
 	 */
 	requestFullPageCapture(opts?: {
 		timeoutMs?: number;
+		projectId?: string;
 	}): Promise<CaptureResponse>;
 	/**
 	 * Subscribe to a client's first valid flow declaration. The handler
@@ -299,19 +305,28 @@ export function startSnapServer(
 		},
 	});
 
-	function pickPrimary(): ClientInfo | null {
-		let primary: ClientInfo | null = null;
+	function pickPrimary(projectId?: string): ClientInfo | null {
+		// When the caller pins a projectId (the user has a project selected
+		// in the sidebar), route requests to that project's bridge — even
+		// if a different bridge connected more recently. Falls back to the
+		// most-recently-connected client when no slug is pinned or no
+		// match is found.
+		let pinned: ClientInfo | null = null;
+		let latest: ClientInfo | null = null;
 		for (const c of clients) {
-			if (!primary || c.connectedAt > primary.connectedAt) primary = c;
+			if (projectId && c.projectId === projectId) {
+				if (!pinned || c.connectedAt > pinned.connectedAt) pinned = c;
+			}
+			if (!latest || c.connectedAt > latest.connectedAt) latest = c;
 		}
-		return primary;
+		return pinned ?? latest;
 	}
 
 	function requestState(
-		opts: { timeoutMs?: number } = {},
+		opts: { timeoutMs?: number; projectId?: string } = {},
 	): Promise<StateResponse> {
 		const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-		const primary = pickPrimary();
+		const primary = pickPrimary(opts.projectId);
 		if (!primary) {
 			return Promise.reject(
 				new Error(
@@ -347,12 +362,12 @@ export function startSnapServer(
 	}
 
 	function requestFullPageCapture(
-		opts: { timeoutMs?: number } = {},
+		opts: { timeoutMs?: number; projectId?: string } = {},
 	): Promise<CaptureResponse> {
 		// Capture can be slow on big pages — give it more breathing room
 		// than requestState by default.
 		const timeoutMs = opts.timeoutMs ?? 15000;
-		const primary = pickPrimary();
+		const primary = pickPrimary(opts.projectId);
 		if (!primary) {
 			return Promise.reject(new Error("No snap-bridge connected."));
 		}

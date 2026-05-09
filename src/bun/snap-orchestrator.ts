@@ -101,7 +101,10 @@ export interface Manifest {
 export interface SnapOrchestrator {
 	readonly sessionId: string;
 	readonly outDir: string;
-	snap(): Promise<
+	snap(opts?: {
+		/** Pin to a specific bridge by projectId — used when multiple RN apps are connected. */
+		projectId?: string;
+	}): Promise<
 		| {
 				ok: true;
 				record: SnapRecord;
@@ -504,7 +507,7 @@ export async function createSnapOrchestrator(
 
 	let sequence = 0;
 
-	async function snap(): Promise<
+	async function snap(opts: { projectId?: string } = {}): Promise<
 		| {
 				ok: true;
 				record: SnapRecord;
@@ -528,16 +531,14 @@ export async function createSnapOrchestrator(
 		);
 
 		const capPromise = captureSimulator(tmpAbs);
+		// `projectId` pins the request to the right bridge when multiple
+		// RN apps are connected at once.
 		const statePromise = options.server.requestState({
 			timeoutMs: options.stateRequestTimeoutMs,
+			projectId: opts.projectId,
 		});
-		// Bridge-side full-page capture (react-native-view-shot). If the host
-		// app registered a SnapTarget AND has the lib installed, we get the
-		// full content (off-screen too); else this rejects and we fall back
-		// to the simctl viewport screenshot. Runs in parallel so the cost
-		// is hidden behind whichever wins.
 		const fullPagePromise = options.server
-			.requestFullPageCapture({ timeoutMs: 15000 })
+			.requestFullPageCapture({ timeoutMs: 15000, projectId: opts.projectId })
 			.then((r) => ({ ok: true as const, image: r.image }))
 			.catch((err: Error) => ({ ok: false as const, error: err.message }));
 

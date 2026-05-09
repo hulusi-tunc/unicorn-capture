@@ -17,6 +17,7 @@ import {
 	loadCaptureProjects,
 	removeCaptureProject,
 } from "./init";
+import { fingerprintRepo } from "./repo-fingerprint";
 import { captureRect } from "./screencapture";
 import { forwardTap, mirrorSimulator } from "./simulator";
 import {
@@ -451,7 +452,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					flows: orch.listFlows(),
 				};
 			},
-			performSnap: async () => {
+			performSnap: async ({ projectSlug }) => {
 				const orch = await ensureOrchestrator();
 				if (snapServer.clientCount() === 0) {
 					return {
@@ -460,7 +461,10 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 							"No snap-bridge connected. Start your RN app with @unicorn-studio/snap-bridge installed.",
 					};
 				}
-				const r = await orch.snap();
+				// `projectSlug` pins the request to the bridge of the project
+				// currently selected in the sidebar — necessary when multiple
+				// RN apps are running at once (folleli + ovria).
+				const r = await orch.snap({ projectId: projectSlug });
 				if (!r.ok) return { ok: false, error: r.error };
 				// Manual upload only — the user pushes when they're ready.
 				return {
@@ -575,6 +579,14 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					return { ok: true, path: paths[0] };
 				} catch (e: any) {
 					return { ok: false, error: e?.message || "Picker failed" };
+				}
+			},
+			detectRepo: async ({ repoPath }) => {
+				try {
+					const fingerprint = fingerprintRepo(repoPath);
+					return { ok: true, fingerprint };
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
 				}
 			},
 			listProjects: async () => ({ projects: loadCaptureProjects() }),
