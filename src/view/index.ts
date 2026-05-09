@@ -837,20 +837,26 @@ let initialized = false;
 
 function render(): void {
 	const s = state.get();
-	const inIosSim = s.source.kind === "iossim";
-	const inWeb = s.source.kind === "url" || s.source.kind === "local";
+	const slug = s.rn.selectedProjectSlug;
+	const onDashboard = slug == null;
+	const inProjectType = onDashboard ? null : projectTypeOf(slug);
+	const inMobile = inProjectType === "mobile";
+	const inWeb = inProjectType === "web";
 
-	// iossim and web each live in persistent roots — toggle visibility
-	// instead of rebuilding so listeners and iframe state survive switches.
+	// Three persistent roots — toggle visibility, never rebuild.
+	ensureDashMounted();
 	ensureRnMounted();
 	ensureWebMounted();
-	setRnVisible(inIosSim);
+	setDashVisible(onDashboard);
+	setRnVisible(inMobile);
 	setWebVisible(inWeb);
-	// Hide the legacy #app entirely — replaced by #web-root.
-	setAppVisible(false);
-	// Drive header action visibility (Snap/Push vs Run) off the source kind.
-	document.body.dataset.mode = s.source.kind;
-	if (inIosSim) {
+	setAppVisible(false); // legacy URL/Local UI is fully replaced.
+
+	if (onDashboard) {
+		applyDashState(s);
+		return;
+	}
+	if (inMobile) {
 		applyRnState(s);
 		return;
 	}
@@ -1834,38 +1840,56 @@ theme.init();
 // Lives in index.html so it survives mode switches without any renderer
 // tearing it down. Brand+tabs are static; the actions slot is populated
 // here once and shown/hidden per-mode via classes on `body[data-mode]`.
-// "Web" is a parent tab covering both URL and Local sub-modes. The internal
-// state.source.kind stays the granular value; the topbar groups them so the
-// user sees one mode for "load a web project from anywhere".
-const isWebKind = (k: SourceKind): boolean => k === "url" || k === "local";
+// Top-level routing: rn.selectedProjectSlug doubles as "active project".
+// null = dashboard, set = inside a project (mobile or web view based on type).
+type ProjectType = "mobile" | "web";
+const projectTypeOf = (slug: string): ProjectType => {
+	const r = state.get().rn.registry.find((p) => p.slug === slug);
+	const raw = (r as unknown as { type?: string } | undefined)?.type;
+	return raw === "web" ? "web" : "mobile";
+};
+const enterProject = (slug: string): void => {
+	const type = projectTypeOf(slug);
+	state.set((cur) => ({
+		...cur,
+		source: { ...cur.source, kind: type === "web" ? "url" : "iossim" },
+		rn: { ...cur.rn, selectedProjectSlug: slug },
+	}));
+};
+const leaveProject = (): void => {
+	state.set((cur) => ({
+		...cur,
+		rn: { ...cur.rn, selectedProjectSlug: null },
+	}));
+};
 
-function syncGlobalTopbar(): void {
-	const kind = state.get().source.kind;
-	const tabs = document.querySelectorAll<HTMLButtonElement>(".gtb-tab");
-	for (const t of tabs) {
-		const target = t.dataset.gtbSrc;
-		const active =
-			target === "web" ? isWebKind(kind) : target === kind;
-		t.classList.toggle("active", active);
-	}
-	// data-mode collapses the two web sub-kinds into one — CSS targets it.
-	document.body.dataset.mode = isWebKind(kind) ? "web" : kind;
-}
-for (const t of document.querySelectorAll<HTMLButtonElement>(".gtb-tab")) {
-	t.addEventListener("click", () => {
-		const target = t.dataset.gtbSrc;
-		if (target === "web") {
-			// Default sub-mode is URL when entering Web tab from iOS Sim.
-			// If already on a web sub-kind, leave it alone.
-			if (!isWebKind(state.get().source.kind)) switchSource("url");
-			return;
-		}
-		if (target === "iossim") switchSource("iossim");
-	});
-}
+// Search query is dashboard-local (not in app state since it has no other use).
+let dashSearchQuery = "";
 
-// Build the actions slot once, then show/hide groups via CSS on body[data-mode].
+// Build the actions slot once. Children are toggled visible per-mode via
+// `body[data-mode="dashboard|mobile|web"]`. HMR-safe (replaceChildren below).
 const gtbActions = document.getElementById("gtb-actions")!;
+gtbActions.replaceChildren();
+
+// Brand button → return to dashboard.
+const gtbBrand = document.getElementById("gtb-brand") as HTMLButtonElement;
+gtbBrand.addEventListener("click", () => leaveProject());
+
+// Search input — filters dashboard cards live.
+const gtbSearchInput = document.getElementById("gtb-search-input") as HTMLInputElement;
+gtbSearchInput.addEventListener("input", () => {
+	dashSearchQuery = gtbSearchInput.value;
+	if (dashRefs) renderDashboardCards(dashRefs);
+});
+
+// Dashboard action: Add project (opens type chooser).
+const gtbAddBtn = document.createElement("button");
+gtbAddBtn.className = "btn btn-primary btn-sm mode-dashboard";
+gtbAddBtn.textContent = "+ Add";
+gtbAddBtn.title = "Onboard a new project";
+gtbAddBtn.addEventListener("click", () => openAddTypeChooser());
+
+// Always-on: theme.
 const gtbThemeBtn = document.createElement("button");
 gtbThemeBtn.className = "btn btn-ghost btn-icon btn-sm";
 gtbThemeBtn.title = "Toggle theme";
@@ -1874,30 +1898,52 @@ gtbThemeBtn.addEventListener("click", () => {
 	const next = theme.toggle();
 	log(`Theme: ${next}`, "info");
 });
-// URL/Local: Run scenario.
-const gtbRunBtn = document.createElement("button");
-gtbRunBtn.className = "btn btn-primary mode-url-local";
-gtbRunBtn.textContent = UI.actions.run;
-gtbRunBtn.addEventListener("click", () => void handleRun());
-// iOS Sim: New session, Push, Snap.
+
+// Project-view actions (mobile = iOS Sim).
+const gtbBackBtn = document.createElement("button");
+gtbBackBtn.className = "btn btn-ghost btn-sm mode-project";
+gtbBackBtn.textContent = "← Back";
+gtbBackBtn.title = "Back to dashboard";
+gtbBackBtn.addEventListener("click", () => leaveProject());
+
 const gtbNewSessionBtn = document.createElement("button");
-gtbNewSessionBtn.className = "btn btn-ghost btn-sm mode-iossim";
+gtbNewSessionBtn.className = "btn btn-ghost btn-sm mode-mobile";
 gtbNewSessionBtn.title = "Start a new session";
 gtbNewSessionBtn.textContent = "↻ New session";
 gtbNewSessionBtn.addEventListener("click", () => void doResetSession());
+
 const gtbPushBtn = document.createElement("button");
-gtbPushBtn.className = "btn btn-secondary mode-iossim";
+gtbPushBtn.className = "btn btn-secondary mode-project";
 gtbPushBtn.title = "Upload pending snaps to the gallery platform";
 gtbPushBtn.textContent = "↑ Push to web";
 gtbPushBtn.addEventListener("click", () => void doPushPending());
+
 const gtbSnapBtn = document.createElement("button");
-gtbSnapBtn.className = "btn btn-primary mode-iossim";
+gtbSnapBtn.className = "btn btn-primary mode-project";
 gtbSnapBtn.textContent = UI.rn.snap.button;
 gtbSnapBtn.addEventListener("click", () => void doSnap());
-gtbActions.append(gtbThemeBtn, gtbRunBtn, gtbNewSessionBtn, gtbPushBtn, gtbSnapBtn);
 
-// Re-run sync on every state change so URL/Local/iOS Sim tabs and Snap/Push
-// disabled+busy states stay in lockstep with the underlying state.
+gtbActions.append(
+	gtbBackBtn,
+	gtbAddBtn,
+	gtbThemeBtn,
+	gtbNewSessionBtn,
+	gtbPushBtn,
+	gtbSnapBtn,
+);
+
+function syncGlobalTopbar(): void {
+	const slug = state.get().rn.selectedProjectSlug;
+	if (slug == null) {
+		document.body.dataset.mode = "dashboard";
+		gtbSearchInput.style.display = "";
+	} else {
+		const type = projectTypeOf(slug);
+		document.body.dataset.mode = type === "web" ? "web" : "mobile";
+		gtbSearchInput.style.display = "none";
+	}
+}
+
 state.subscribe(syncGlobalTopbar);
 state.subscribe((s) => {
 	const r = s.rn;
@@ -1921,9 +1967,6 @@ state.subscribe((s) => {
 				? `↑ Push ${projectSnaps.length} to ${projectName}`
 				: `↑ Push ${projectSnaps.length} to web`
 			: "Nothing to push";
-	const canRun =
-		!!s.baseUrl && !!s.devices.length && (currentFlow()?.steps.length ?? 0) > 0;
-	gtbRunBtn.disabled = !canRun;
 });
 syncGlobalTopbar();
 
@@ -2293,6 +2336,8 @@ function buildRnLayout(): RnRefs {
 
 function ensureRnMounted(): RnRefs {
 	if (!rnRefs) {
+		// Clean up any leftover from a previous module load (HMR/hot-reload).
+		document.getElementById("rn-root")?.remove();
 		rnRefs = buildRnLayout();
 		document.body.appendChild(rnRefs.root);
 		installDragAutoScroll(rnRefs);
@@ -2380,6 +2425,293 @@ function setRnVisible(visible: boolean): void {
 function setAppVisible(visible: boolean): void {
 	const app = document.getElementById("app");
 	if (app) app.style.display = visible ? "" : "none";
+}
+
+// ─── DASHBOARD (project picker) ───
+// First screen: grid of project cards from registry, search filter, Add modal.
+// Click a card → enters that project (mobile or web view based on type).
+interface DashRefs {
+	root: HTMLDivElement;
+	cardsGrid: HTMLDivElement;
+	emptyState: HTMLDivElement;
+}
+let dashRefs: DashRefs | null = null;
+
+function buildDashboard(): DashRefs {
+	const root = ce("div", "dash-root");
+	root.id = "dash-root";
+	root.style.display = "none";
+
+	const inner = ce("div", "dash-inner");
+
+	const heading = ce("div", "dash-heading");
+	const headingTitle = ce("h1", "dash-title");
+	headingTitle.textContent = "Projects";
+	const headingSub = ce("p", "dash-sub");
+	headingSub.textContent =
+		"Pick a project to capture from, or click + Add to onboard a new one.";
+	heading.append(headingTitle, headingSub);
+
+	const cardsGrid = ce("div", "dash-grid");
+	const emptyState = ce("div", "dash-empty");
+	emptyState.innerHTML = `
+		<div class="dash-empty-icon" aria-hidden="true">📁</div>
+		<div class="dash-empty-title">No projects yet</div>
+		<div class="dash-empty-body">Click <b>+ Add</b> to onboard your first project — Mobile (iOS Sim) or Web.</div>
+	`;
+
+	inner.append(heading, cardsGrid, emptyState);
+	root.appendChild(inner);
+
+	return { root, cardsGrid, emptyState };
+}
+
+function ensureDashMounted(): DashRefs {
+	if (!dashRefs) {
+		document.getElementById("dash-root")?.remove();
+		dashRefs = buildDashboard();
+		document.body.appendChild(dashRefs.root);
+	}
+	return dashRefs;
+}
+
+function setDashVisible(visible: boolean): void {
+	if (!dashRefs) return;
+	dashRefs.root.style.display = visible ? "flex" : "none";
+}
+
+function renderDashboardCards(refs: DashRefs): void {
+	const r = state.get().rn;
+	const q = dashSearchQuery.trim().toLowerCase();
+	const filtered = r.registry.filter((p) => {
+		if (!q) return true;
+		const hay = `${p.slug} ${p.name ?? ""}`.toLowerCase();
+		return hay.includes(q);
+	});
+
+	refs.cardsGrid.replaceChildren();
+	if (r.registry.length === 0) {
+		refs.emptyState.style.display = "";
+		refs.cardsGrid.style.display = "none";
+		return;
+	}
+	refs.emptyState.style.display = "none";
+	refs.cardsGrid.style.display = "";
+
+	if (filtered.length === 0) {
+		const noResults = ce("div", "dash-no-results");
+		noResults.textContent = `No project matches “${dashSearchQuery}”.`;
+		refs.cardsGrid.appendChild(noResults);
+		return;
+	}
+
+	for (const p of filtered) {
+		const card = ce("button", "dash-card");
+		card.type = "button";
+		const type = projectTypeOf(p.slug);
+		const connected = r.projects.includes(p.slug);
+
+		const top = ce("div", "dash-card-top");
+		const badge = ce("span", `dash-card-type dash-card-type-${type}`);
+		badge.textContent = type === "web" ? "WEB" : "MOBILE";
+		const status = ce("span", `dash-card-status ${connected ? "is-connected" : ""}`);
+		status.title = connected ? "snap-bridge connected" : "not connected";
+		top.append(badge, status);
+
+		const nameEl = ce("div", "dash-card-name");
+		nameEl.textContent = p.name || p.slug;
+		const slugEl = ce("div", "dash-card-slug");
+		slugEl.textContent = p.slug;
+
+		card.append(top, nameEl, slugEl);
+		card.addEventListener("click", () => enterProject(p.slug));
+		refs.cardsGrid.appendChild(card);
+	}
+}
+
+function applyDashState(_s: AppState): void {
+	if (!dashRefs) return;
+	renderDashboardCards(dashRefs);
+}
+
+// + Add → modal with two big tiles: Mobile (iOS Sim) or Web. Each routes to
+// the right onboarding flow. For now, Web takes a name + URL (system later).
+function openAddTypeChooser(): void {
+	const backdrop = document.createElement("div");
+	backdrop.className = "rn-confirm-backdrop";
+	const dlg = document.createElement("div");
+	dlg.className = "rn-confirm-dialog dash-add-dialog";
+
+	const title = document.createElement("h3");
+	title.className = "rn-confirm-title";
+	title.textContent = "What kind of project?";
+
+	const body = document.createElement("p");
+	body.className = "rn-confirm-body";
+	body.textContent = "Pick how you want to capture screens for this project.";
+
+	const tiles = document.createElement("div");
+	tiles.className = "dash-type-tiles";
+
+	const mobileTile = document.createElement("button");
+	mobileTile.type = "button";
+	mobileTile.className = "dash-type-tile";
+	mobileTile.innerHTML = `
+		<div class="dash-type-icon">📱</div>
+		<div class="dash-type-name">Mobile</div>
+		<div class="dash-type-sub">iOS Simulator + snap-bridge from your RN app.</div>
+	`;
+	mobileTile.addEventListener("click", () => {
+		close();
+		openWizard();
+	});
+
+	const webTile = document.createElement("button");
+	webTile.type = "button";
+	webTile.className = "dash-type-tile";
+	webTile.innerHTML = `
+		<div class="dash-type-icon">🌐</div>
+		<div class="dash-type-name">Web</div>
+		<div class="dash-type-sub">Any web app — paste a URL and capture screens from the live page.</div>
+	`;
+	webTile.addEventListener("click", () => {
+		close();
+		openAddWebForm();
+	});
+
+	tiles.append(mobileTile, webTile);
+
+	const actions = document.createElement("div");
+	actions.className = "rn-confirm-actions";
+	const cancelBtn = document.createElement("button");
+	cancelBtn.className = "btn btn-ghost";
+	cancelBtn.textContent = "Cancel";
+	actions.appendChild(cancelBtn);
+
+	dlg.append(title, body, tiles, actions);
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = (): void => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent): void => {
+		if (e.key === "Escape") close();
+	};
+	cancelBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+}
+
+// Web project onboarding — minimal form for now (system wired later).
+function openAddWebForm(): void {
+	const backdrop = document.createElement("div");
+	backdrop.className = "rn-confirm-backdrop";
+	const dlg = document.createElement("div");
+	dlg.className = "rn-confirm-dialog";
+
+	const title = document.createElement("h3");
+	title.className = "rn-confirm-title";
+	title.textContent = "Add web project";
+
+	const body = document.createElement("p");
+	body.className = "rn-confirm-body";
+	body.textContent =
+		"Give it a name and the URL where the app runs. Capture system is plugged in later.";
+
+	const nameLabel = document.createElement("label");
+	nameLabel.className = "rn-push-field-label";
+	nameLabel.textContent = "Name";
+	const nameInput = document.createElement("input");
+	nameInput.className = "input";
+	nameInput.type = "text";
+	nameInput.placeholder = "e.g. Acme Storefront";
+
+	const urlLabel = document.createElement("label");
+	urlLabel.className = "rn-push-field-label";
+	urlLabel.textContent = "URL";
+	const urlInput = document.createElement("input");
+	urlInput.className = "input";
+	urlInput.type = "url";
+	urlInput.placeholder = "https://your-app.example.com/";
+
+	const errorBox = document.createElement("div");
+	errorBox.className = "rn-wizard-error";
+	errorBox.style.display = "none";
+
+	const actions = document.createElement("div");
+	actions.className = "rn-confirm-actions";
+	const cancelBtn = document.createElement("button");
+	cancelBtn.className = "btn btn-ghost";
+	cancelBtn.textContent = "Cancel";
+	const saveBtn = document.createElement("button");
+	saveBtn.className = "btn btn-primary";
+	saveBtn.textContent = "Add project";
+	actions.append(cancelBtn, saveBtn);
+
+	dlg.append(title, body, nameLabel, nameInput, urlLabel, urlInput, errorBox, actions);
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = (): void => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent): void => {
+		if (e.key === "Escape") close();
+	};
+	cancelBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+
+	saveBtn.addEventListener("click", () => {
+		const nm = nameInput.value.trim();
+		const u = urlInput.value.trim();
+		if (!nm || !u) {
+			errorBox.style.display = "";
+			errorBox.textContent = "Name and URL are required.";
+			return;
+		}
+		const slug = nm
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-|-$/g, "")
+			.slice(0, 48) || `web-${Date.now().toString(36).slice(-6)}`;
+
+		// Stub: append to the in-memory registry as a "web" project. The
+		// snap-bridge / upload wiring lands in the next pass; for now this
+		// just gives the dashboard a card the user can click into.
+		state.set((cur) => ({
+			...cur,
+			source: { ...cur.source, kind: "url", url: u },
+			rn: {
+				...cur.rn,
+				registry: [
+					...cur.rn.registry,
+					{
+						slug,
+						name: nm,
+						platform: "web",
+						projectToken: "",
+						uploadUrl: "",
+						registeredAt: new Date().toISOString(),
+						// type field not on RnProjectInfo — we attach it ad-hoc;
+						// projectTypeOf() reads it via a structural cast.
+						type: "web",
+					} as unknown as RnProjectInfo,
+				],
+				selectedProjectSlug: slug,
+			},
+		}));
+		close();
+	});
+
+	queueMicrotask(() => nameInput.focus());
 }
 
 // ─── WEB MODE LAYOUT (URL / Local) ───
@@ -2548,6 +2880,8 @@ function buildWebLayout(): WebRefs {
 
 function ensureWebMounted(): WebRefs {
 	if (!webRefs) {
+		// Clean up any leftover from a previous module load (HMR/hot-reload).
+		document.getElementById("web-root")?.remove();
 		webRefs = buildWebLayout();
 		document.body.appendChild(webRefs.root);
 	}

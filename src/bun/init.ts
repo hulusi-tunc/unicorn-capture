@@ -14,9 +14,12 @@ import { dirname, join, relative } from "node:path";
  * and Capture's in-app wizard. Pure file/HTTP operations, no UI.
  */
 
-export const SNAP_BRIDGE_INSTALL_REF =
-	process.env.SNAP_BRIDGE_GIT ??
-	"git+ssh://git@github.com/hulusi-tunc/snap-bridge.git";
+/**
+ * @deprecated Use `getSnapBridgeRef()` from `./snap-bridge-version`
+ * instead. Kept as a re-export for any external imports of the old name.
+ */
+export { getSnapBridgeRef as SNAP_BRIDGE_INSTALL_REF_FN } from "./snap-bridge-version";
+import { getSnapBridgeRef } from "./snap-bridge-version";
 
 export interface InitInputs {
 	repoPath: string;
@@ -179,16 +182,28 @@ export function findRootLayoutPath(rnAppDir: string): string {
 }
 
 // ── Edits ──────────────────────────────────────────────────────────────────
-export function addBridgeDep(rootPkgPath: string): {
-	changed: boolean;
-	ref: string;
-} {
+
+/**
+ * Add (or update) the `@unicorn-studio/snap-bridge` devDependency in the
+ * given package.json. `ref` is the install spec — caller is responsible
+ * for sourcing it (typically from `getSnapBridgeRef()` so every install
+ * pins to the same tag).
+ *
+ * Returns `{ previousRef }` so the caller can implement a clean rollback
+ * by passing the old ref back through this function.
+ */
+export function addBridgeDep(
+	rootPkgPath: string,
+	ref: string,
+): { changed: boolean; ref: string; previousRef: string | null } {
 	const pkg = readJson(rootPkgPath);
 	if (!pkg) throw new Error(`Could not read ${rootPkgPath}`);
-	const ref = SNAP_BRIDGE_INSTALL_REF;
 	pkg.devDependencies = pkg.devDependencies ?? {};
 	const existing = pkg.devDependencies["@unicorn-studio/snap-bridge"];
-	if (existing && existing === ref) return { changed: false, ref };
+	const previousRef = typeof existing === "string" ? existing : null;
+	if (previousRef === ref) {
+		return { changed: false, ref, previousRef };
+	}
 	pkg.devDependencies["@unicorn-studio/snap-bridge"] = ref;
 	const sorted: Record<string, string> = {};
 	for (const k of Object.keys(pkg.devDependencies).sort()) {
@@ -196,19 +211,84 @@ export function addBridgeDep(rootPkgPath: string): {
 	}
 	pkg.devDependencies = sorted;
 	writeFileSync(rootPkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
-	return { changed: true, ref };
+	return { changed: true, ref, previousRef };
 }
 
-const METRO_CONFIG_TEMPLATE = `// Generated/extended by @unicorn-studio/snap-bridge.
+/**
+ * Remove (or restore) the snap-bridge devDependency. If `restoreRef` is
+ * provided, sets the dep back to that string instead of deleting it —
+ * used by the installer's rollback path so we never leave the package
+ * in an in-between state.
+ */
+export function removeBridgeDep(
+	rootPkgPath: string,
+	restoreRef: string | null,
+): void {
+	const pkg = readJson(rootPkgPath);
+	if (!pkg) return;
+	pkg.devDependencies = pkg.devDependencies ?? {};
+	if (restoreRef) {
+		pkg.devDependencies["@unicorn-studio/snap-bridge"] = restoreRef;
+	} else {
+		delete pkg.devDependencies["@unicorn-studio/snap-bridge"];
+	}
+	const sorted: Record<string, string> = {};
+	for (const k of Object.keys(pkg.devDependencies).sort()) {
+		sorted[k] = pkg.devDependencies[k];
+	}
+	pkg.devDependencies = sorted;
+	writeFileSync(rootPkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+}
+
+/**
+ * Compute the relative path from the RN app dir to the workspace root.
+ * Handles every layout we care about:
+ *   - mobile/ at repo root → ".." (1 level)
+ *   - apps/mobile/ in monorepo → "../.." (2 levels)
+ *   - apps/web/mobile/ → "../../.." (3 levels)
+ *   - workspace IS the rn app → "." (no monorepo)
+ *
+ * The old code hardcoded `path.resolve(projectRoot, "../..")` and broke
+ * on the `mobile/` (one-level) layout — the bug ovria hit.
+ */
+export function metroWorkspaceRelativePath(
+	rnAppDir: string,
+	workspaceRoot: string,
+): string {
+	if (rnAppDir === workspaceRoot) return ".";
+	const rel = rnAppDir.startsWith(workspaceRoot + "/")
+		? rnAppDir.slice(workspaceRoot.length + 1)
+		: rnAppDir;
+	const depth = rel.split("/").filter(Boolean).length;
+	return Array.from({ length: depth }, () => "..").join("/");
+}
+
+/**
+ * Build the metro.config.js source for a project. `workspaceRelative` is
+ * the dotdot path from `__dirname` (the rnAppDir) up to the workspace
+ * root, computed by `metroWorkspaceRelativePath`. `flavor` decides
+ * whether we use Expo's default config or the bare RN one.
+ */
+export function metroConfigTemplate(opts: {
+	workspaceRelative: string;
+	flavor: "expo" | "rn-cli";
+}): string {
+	const defaultConfigImport =
+		opts.flavor === "expo"
+			? `const { getDefaultConfig } = require("expo/metro-config");\n\nconst config = getDefaultConfig(projectRoot);`
+			: `const { getDefaultConfig } = require("@react-native/metro-config");\n\nconst config = getDefaultConfig(projectRoot);`;
+
+	return `// Generated/extended by @unicorn-studio/snap-bridge.
 const fs = require("fs");
 const path = require("path");
 
 const projectRoot = __dirname;
-const workspaceRoot = path.resolve(projectRoot, "../..");
+// Relative path from this file's directory up to the workspace root —
+// where snap-bridge lives in node_modules. Computed at install time
+// so it's correct for any monorepo layout.
+const workspaceRoot = path.resolve(projectRoot, ${JSON.stringify(opts.workspaceRelative)});
 
-const { getDefaultConfig } = require("expo/metro-config");
-
-const config = getDefaultConfig(projectRoot);
+${defaultConfigImport}
 
 const externalLinkedPackages = ["@unicorn-studio/snap-bridge"];
 const externalRealPaths = externalLinkedPackages
@@ -231,23 +311,50 @@ config.resolver.disableHierarchicalLookup = true;
 
 module.exports = config;
 `;
+}
 
-export function patchMetroConfig(rnAppDir: string): {
+/**
+ * Write or annotate the project's metro.config.js so Metro can follow
+ * the snap-bridge dep across the workspace boundary. Caller passes the
+ * fingerprint-derived `workspaceRoot` + `flavor` so the template gets
+ * the correct relative path.
+ *
+ * Returns the previous file contents (or `null` if there was none) so
+ * the installer's rollback step can restore on failure.
+ */
+export function patchMetroConfig(opts: {
+	rnAppDir: string;
+	workspaceRoot: string;
+	flavor: "expo" | "rn-cli";
+}): {
 	wrote: boolean;
 	mode: "created" | "annotated" | "already-configured";
+	previousContents: string | null;
 } {
-	const target = join(rnAppDir, "metro.config.js");
+	const target = join(opts.rnAppDir, "metro.config.js");
+	const workspaceRelative = metroWorkspaceRelativePath(
+		opts.rnAppDir,
+		opts.workspaceRoot,
+	);
 	if (!existsSync(target)) {
-		writeFileSync(target, METRO_CONFIG_TEMPLATE, "utf8");
-		return { wrote: true, mode: "created" };
+		writeFileSync(
+			target,
+			metroConfigTemplate({ workspaceRelative, flavor: opts.flavor }),
+			"utf8",
+		);
+		return { wrote: true, mode: "created", previousContents: null };
 	}
 	const cur = readFileSync(target, "utf8");
 	if (cur.includes("@unicorn-studio/snap-bridge")) {
-		return { wrote: false, mode: "already-configured" };
+		return {
+			wrote: false,
+			mode: "already-configured",
+			previousContents: cur,
+		};
 	}
 	const note = `\n\n// snap-bridge: this metro.config.js needs to follow the\n// @unicorn-studio/snap-bridge dep into watchFolders so Metro can resolve it.\n// Reference: https://github.com/hulusi-tunc/snap-bridge/blob/main/examples/metro.config.js\n`;
 	writeFileSync(target, cur + note, "utf8");
-	return { wrote: true, mode: "annotated" };
+	return { wrote: true, mode: "annotated", previousContents: cur };
 }
 
 // ── _layout.tsx auto-injection (regex heuristic, conservative) ─────────────
@@ -418,6 +525,19 @@ export function registerWithCapture(payload: CaptureProjectEntry): string {
 }
 
 /**
+ * Look up a registered project by its slug. Returns null when not found.
+ * Used by RPC handlers + the snap-flows improver to resolve `slug` →
+ * upload URL + token + on-disk paths.
+ */
+export function findProjectForBridge(
+	projectId: string,
+): CaptureProjectEntry | null {
+	if (!projectId) return null;
+	const list = loadCaptureProjects();
+	return list.find((p) => p.slug === projectId) ?? null;
+}
+
+/**
  * Remove a project from the local capture registry. Returns true if a
  * matching slug was found + deleted. Doesn't touch anything on the
  * platform side or in the user's repo.
@@ -570,7 +690,7 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 		log("info", "reusing supplied project token");
 	}
 
-	const dep = addBridgeDep(installTargetPkg);
+	const dep = addBridgeDep(installTargetPkg, getSnapBridgeRef());
 	if (dep.changed)
 		log(
 			"ok",
@@ -583,7 +703,11 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 		);
 
 	if (isMonorepo) {
-		const metro = patchMetroConfig(rnAppDir);
+		const metro = patchMetroConfig({
+			rnAppDir,
+			workspaceRoot,
+			flavor: "expo",
+		});
 		const metroRel = relative(workspaceRoot, join(rnAppDir, "metro.config.js"));
 		if (metro.mode === "created") log("ok", `wrote ${metroRel}`);
 		else if (metro.mode === "annotated")

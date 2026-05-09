@@ -13,6 +13,7 @@ import type { RnSnapInfo, ScenarioRunnerRPC } from "../lib/rpc";
 import { validateDeviceConfig, validateScenario } from "../lib/schemas";
 import {
 	type CaptureProjectEntry,
+	findProjectForBridge,
 	initProject,
 	loadCaptureProjects,
 	removeCaptureProject,
@@ -103,11 +104,6 @@ async function ensureOrchestrator(): Promise<SnapOrchestrator> {
 		});
 	}
 	return snapOrch;
-}
-function findProjectForBridge(projectId: string): CaptureProjectEntry | null {
-	if (!projectId) return null;
-	const list = loadCaptureProjects();
-	return list.find((p) => p.slug === projectId) ?? null;
 }
 
 /**

@@ -138,6 +138,25 @@ export interface RepoFingerprint {
 	iosWorkspace: { exists: boolean; podfileLockExists: boolean };
 }
 
+/**
+ * One progress event in the new wizard's Phase 3 install stream. The bun
+ * side emits these via `rpc.send.onInitProgress({...})`; the view side
+ * subscribes via `electroview.rpc.on("onInitProgress", handler)`.
+ *
+ * `phase` lets the UI render the correct visual state without parsing
+ * `message`. `progress` is an optional 0..1 indeterminate-or-determinate
+ * hint for long ops (npm install, snap-flows-scan). `outputLine` carries
+ * one line of subprocess stdout/stderr for the "View output" expander.
+ */
+export interface InstallProgressMessage {
+	installId: string;
+	stepId: string;
+	phase: "started" | "progress" | "succeeded" | "failed" | "rolled-back";
+	message: string;
+	progress?: number;
+	outputLine?: string;
+}
+
 export interface RnInitOutcome {
 	ok: boolean;
 	error?: string;
@@ -348,7 +367,15 @@ export type ScenarioRunnerRPC = {
 				response: RnInitOutcome;
 			};
 		};
-		messages: Record<string, never>;
+		messages: {
+			/**
+			 * Streamed during the new wizard's Phase 3 install. Bun emits
+			 * one event per step transition (`started` → optional
+			 * `progress` lines → `succeeded`/`failed`/`rolled-back`).
+			 * The view's stepper UI reads these in real time.
+			 */
+			onInitProgress: InstallProgressMessage;
+		};
 	};
 	webview: {
 		requests: Record<string, never>;

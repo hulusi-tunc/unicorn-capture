@@ -15,13 +15,19 @@
 </head>
 <body>
   <nav id="global-topbar" aria-label="App chrome">
-    <div class="gtb-brand">
+    <button class="gtb-brand" id="gtb-brand" type="button" aria-label="Back to dashboard">
       <img src="logo.svg" alt="" class="gtb-brand-mark">
       <span class="gtb-brand-name">Prisma</span>
-    </div>
-    <div class="gtb-tabs" role="tablist" aria-label="Source mode">
-      <button class="gtb-tab" data-gtb-src="web">Web</button>
-      <button class="gtb-tab" data-gtb-src="iossim">iOS Sim</button>
+    </button>
+    <div class="gtb-search">
+      <span class="gtb-search-icon" aria-hidden="true">⌕</span>
+      <input
+        id="gtb-search-input"
+        class="gtb-search-input"
+        type="search"
+        placeholder="Search projects, flows, snaps…"
+        aria-label="Search"
+      />
     </div>
     <div class="gtb-actions" id="gtb-actions"><!-- JS populates --></div>
   </nav>
