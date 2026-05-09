@@ -18,7 +18,15 @@ import {
 	loadCaptureProjects,
 	removeCaptureProject,
 } from "./init";
+import {
+	type InstallPlan,
+	type InstallOutcome,
+	runInstaller,
+} from "./installer";
+import { assembleCoreSteps } from "./installer-steps";
 import { fingerprintRepo } from "./repo-fingerprint";
+import { buildImprovePrompt } from "./snap-flows-improver";
+import { buildVerifyStep } from "./verifier";
 import { captureRect } from "./screencapture";
 import { forwardTap, mirrorSimulator } from "./simulator";
 import {
@@ -581,6 +589,56 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				try {
 					const fingerprint = fingerprintRepo(repoPath);
 					return { ok: true, fingerprint };
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			runInstaller: async ({ plan: planInput }) => {
+				// Fingerprint comes over the wire; re-validate that the picked
+				// rnAppDir still exists on disk before we touch anything.
+				const installPlan: InstallPlan = {
+					slug: planInput.slug,
+					name: planInput.name,
+					platform: planInput.platform,
+					platformUrl: planInput.platformUrl,
+					setupToken: planInput.setupToken,
+					projectToken: planInput.projectToken,
+					fingerprint: planInput.fingerprint as InstallPlan["fingerprint"],
+					options: planInput.options,
+				};
+				const steps = assembleCoreSteps();
+				if (planInput.options.verifyAfterInstall) {
+					steps.push(buildVerifyStep(snapServer));
+				}
+				const outcome: InstallOutcome = await runInstaller({
+					plan: installPlan,
+					steps,
+					send: (msg) => {
+						try {
+							// Pipe each step transition out to the wizard's
+							// stepper UI. The proxy is typed via the `messages`
+							// channel in lib/rpc.ts.
+							(rpc.send as unknown as {
+								onInitProgress: (m: typeof msg) => void;
+							}).onInitProgress(msg);
+						} catch (err) {
+							dbg(`onInitProgress send failed: ${(err as Error).message}`);
+						}
+					},
+				});
+				if (outcome.ok) {
+					// Refresh the projects list so the new project shows up
+					// in the sidebar without a manual reload.
+					try {
+						loadCaptureProjects();
+					} catch {}
+				}
+				return outcome;
+			},
+			improveSnapFlows: async ({ slug }) => {
+				try {
+					const r = buildImprovePrompt(slug);
+					return { ok: true, ...r };
 				} catch (err) {
 					return { ok: false, error: (err as Error).message };
 				}

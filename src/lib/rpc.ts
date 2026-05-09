@@ -157,6 +157,47 @@ export interface InstallProgressMessage {
 	outputLine?: string;
 }
 
+/**
+ * Wire format for `runInstaller`. Carries the user's choices from the
+ * Plan phase plus the fingerprint already gathered in the Detect phase
+ * (re-using it instead of re-fingerprinting on submit). The bun-side
+ * driver assembles steps + the verify step from this input.
+ */
+export interface InstallPlanInput {
+	slug: string;
+	name?: string;
+	platform: "ios" | "android" | "web";
+	platformUrl: string;
+	setupToken?: string;
+	projectToken?: string;
+	fingerprint: RepoFingerprint;
+	options: {
+		runPackageInstall: boolean;
+		installViewShot: boolean;
+		runPodInstall: boolean;
+		runSnapFlowsScan: boolean;
+		writeUseSnapTargetHook: boolean;
+		verifyAfterInstall: boolean;
+	};
+}
+
+export interface InstallOutcomeWire {
+	ok: boolean;
+	error?: string;
+	installId: string;
+	completedSteps: string[];
+	rolledBackSteps: string[];
+	projectToken?: string;
+	registered?: { uploadUrl: string; rnAppDir: string };
+	verify?: {
+		bridgeConnected: boolean;
+		flowCount?: number;
+		screenCount?: number;
+		fullPageReady?: boolean;
+		notes: string[];
+	};
+}
+
 export interface RnInitOutcome {
 	ok: boolean;
 	error?: string;
@@ -333,6 +374,21 @@ export type ScenarioRunnerRPC = {
 				params: { repoPath: string };
 				response:
 					| { ok: true; fingerprint: RepoFingerprint }
+					| { ok: false; error: string };
+			};
+			runInstaller: {
+				params: { plan: InstallPlanInput };
+				response: InstallOutcomeWire;
+			};
+			improveSnapFlows: {
+				params: { slug: string };
+				response:
+					| {
+							ok: true;
+							clipboardPayload: string;
+							flowsFilePath: string;
+							summary: string;
+					  }
 					| { ok: false; error: string };
 			};
 			listProjects: {

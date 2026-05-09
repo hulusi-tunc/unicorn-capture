@@ -17,6 +17,7 @@
 	"dependencies": {
 		"electrobun": "^1.18.1",
 		"js-yaml": "^4.1.0",
+		"lucide": "^1.14.0",
 		"zod": "^3.24.0"
 	},
 	"devDependencies": {
