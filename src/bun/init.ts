@@ -80,33 +80,93 @@ export function findWorkspaceRoot(start: string): string {
 }
 
 export function findRnAppDir(workspaceRoot: string): string | null {
-	const candidates: string[] = [];
-	const directApp = join(workspaceRoot, "app");
-	if (existsSync(directApp) && statSync(directApp).isDirectory()) {
-		candidates.push(workspaceRoot);
-	}
-	const appsDir = join(workspaceRoot, "apps");
-	if (existsSync(appsDir) && statSync(appsDir).isDirectory()) {
-		for (const name of readdirSync(appsDir)) {
-			const full = join(appsDir, name);
-			if (
-				statSync(full).isDirectory() &&
-				existsSync(join(full, "app")) &&
-				existsSync(join(full, "package.json"))
-			) {
-				candidates.push(full);
-			}
-		}
-	}
-	for (const c of candidates) {
-		const pkg = readJson(join(c, "package.json"));
+	const isRnDir = (dir: string): boolean => {
+		const pkgPath = join(dir, "package.json");
+		if (!existsSync(pkgPath)) return false;
+		const pkg = readJson(pkgPath);
 		const deps = {
 			...(pkg?.dependencies ?? {}),
 			...(pkg?.devDependencies ?? {}),
 		};
-		if (deps.expo || deps["expo-router"]) return c;
+		return Boolean(
+			deps.expo || deps["expo-router"] || deps["react-native"],
+		);
+	};
+
+	const SKIP_DIRS = new Set([
+		"node_modules",
+		".git",
+		".github",
+		"dist",
+		"build",
+		"out",
+		".expo",
+		".next",
+		".turbo",
+		".cache",
+	]);
+
+	const candidates: string[] = [];
+
+	// 1. Root itself (covers a single-package repo where `mobile/` IS the root).
+	if (existsSync(join(workspaceRoot, "package.json"))) {
+		candidates.push(workspaceRoot);
 	}
-	return null;
+
+	// 2. Scan every direct child directory — covers both monorepo conventions
+	//    (apps/, packages/) AND ad-hoc layouts (mobile/, app/, client/) without
+	//    hardcoding folder names.
+	let topEntries: string[] = [];
+	try {
+		topEntries = readdirSync(workspaceRoot);
+	} catch {
+		// unreadable
+	}
+	for (const name of topEntries) {
+		if (name.startsWith(".") || SKIP_DIRS.has(name)) continue;
+		const full = join(workspaceRoot, name);
+		try {
+			if (!statSync(full).isDirectory()) continue;
+		} catch {
+			continue;
+		}
+		// Direct child with its own package.json
+		if (existsSync(join(full, "package.json"))) {
+			candidates.push(full);
+		}
+		// One level deeper for monorepo conventions (apps/<x>, packages/<x>, …)
+		try {
+			for (const inner of readdirSync(full)) {
+				if (inner.startsWith(".") || SKIP_DIRS.has(inner)) continue;
+				const innerFull = join(full, inner);
+				try {
+					if (
+						statSync(innerFull).isDirectory() &&
+						existsSync(join(innerFull, "package.json"))
+					) {
+						candidates.push(innerFull);
+					}
+				} catch {
+					// skip
+				}
+			}
+		} catch {
+			// skip
+		}
+	}
+
+	// Prefer dirs that look like expo-router (have an `app/` folder).
+	const withAppDir: string[] = [];
+	const withoutAppDir: string[] = [];
+	const seen = new Set<string>();
+	for (const c of candidates) {
+		if (seen.has(c)) continue;
+		seen.add(c);
+		if (!isRnDir(c)) continue;
+		if (existsSync(join(c, "app"))) withAppDir.push(c);
+		else withoutAppDir.push(c);
+	}
+	return withAppDir[0] ?? withoutAppDir[0] ?? null;
 }
 
 export function findRootLayoutPath(rnAppDir: string): string {
@@ -357,6 +417,22 @@ export function registerWithCapture(payload: CaptureProjectEntry): string {
 	return path;
 }
 
+/**
+ * Remove a project from the local capture registry. Returns true if a
+ * matching slug was found + deleted. Doesn't touch anything on the
+ * platform side or in the user's repo.
+ */
+export function removeCaptureProject(slug: string): boolean {
+	const path = captureProjectsPath();
+	if (!existsSync(path)) return false;
+	const list = loadCaptureProjects();
+	const idx = list.findIndex((p) => p.slug === slug);
+	if (idx === -1) return false;
+	list.splice(idx, 1);
+	writeFileSync(path, `${JSON.stringify(list, null, 2)}\n`, "utf8");
+	return true;
+}
+
 // ── Platform call ──────────────────────────────────────────────────────────
 export async function createProjectOnPlatform(args: {
 	url: string;
@@ -442,7 +518,15 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 	log("ok", `workspace root: ${workspaceRoot}`);
 	log("ok", `RN app dir: ${rnAppDir}`);
 
-	const rootPkgPath = join(workspaceRoot, "package.json");
+	// In a monorepo (root package.json with workspaces), the snap-bridge dep
+	// goes on the root and Metro needs watchFolders to follow it across the
+	// workspace boundary. In a single-package layout (no root package.json),
+	// the RN app dir IS effectively the root — install + Metro both work
+	// with default Expo config and no metro.config.js patching is needed.
+	const isMonorepo = existsSync(join(workspaceRoot, "package.json"));
+	const installTargetPkg = isMonorepo
+		? join(workspaceRoot, "package.json")
+		: join(rnAppDir, "package.json");
 	const layoutPath = findRootLayoutPath(rnAppDir);
 	const name = (input.name?.trim() || slug).trim();
 	const platformUrl = input.platformUrl.replace(/\/$/, "");
@@ -486,27 +570,34 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 		log("info", "reusing supplied project token");
 	}
 
-	const dep = addBridgeDep(rootPkgPath);
+	const dep = addBridgeDep(installTargetPkg);
 	if (dep.changed)
 		log(
 			"ok",
-			`added @unicorn-studio/snap-bridge to ${relative(workspaceRoot, rootPkgPath)}`,
+			`added @unicorn-studio/snap-bridge to ${relative(workspaceRoot, installTargetPkg)}`,
 		);
 	else
 		log(
 			"info",
-			`@unicorn-studio/snap-bridge already in ${relative(workspaceRoot, rootPkgPath)}`,
+			`@unicorn-studio/snap-bridge already in ${relative(workspaceRoot, installTargetPkg)}`,
 		);
 
-	const metro = patchMetroConfig(rnAppDir);
-	const metroRel = relative(workspaceRoot, join(rnAppDir, "metro.config.js"));
-	if (metro.mode === "created") log("ok", `wrote ${metroRel}`);
-	else if (metro.mode === "annotated")
+	if (isMonorepo) {
+		const metro = patchMetroConfig(rnAppDir);
+		const metroRel = relative(workspaceRoot, join(rnAppDir, "metro.config.js"));
+		if (metro.mode === "created") log("ok", `wrote ${metroRel}`);
+		else if (metro.mode === "annotated")
+			log(
+				"warn",
+				`${metroRel} exists — appended a TODO note. Verify it follows snap-bridge into watchFolders.`,
+			);
+		else log("info", `${metroRel} already configured`);
+	} else {
 		log(
-			"warn",
-			`${metroRel} exists — appended a TODO note. Verify it follows snap-bridge into watchFolders.`,
+			"info",
+			"single-package layout — default Metro config is sufficient (snap-bridge installs into local node_modules)",
 		);
-	else log("info", `${metroRel} already configured`);
+	}
 
 	const inj = injectLayoutSnippet(layoutPath, slug);
 	if (inj.mode === "injected")

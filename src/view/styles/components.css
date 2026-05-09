@@ -1,78 +1,120 @@
-/* ── HEADER ── */
+/* ── HEADER ── matches the web platform's DashboardTopNav (60px, hairline border, surface backdrop) */
 .header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 0 var(--space-4);
-	height: 52px;
-	background: var(--bg-1);
+	padding: 0 var(--space-5);
+	height: 60px;
+	background: var(--bg-0);
 	border-bottom: 1px solid var(--border);
 	-webkit-app-region: drag;
 	flex-shrink: 0;
+	font-family: var(--font);
 }
 .header h1 {
 	display: flex;
 	align-items: center;
-	gap: 0;
+	gap: 10px;
 	line-height: 1;
 }
 .header-actions {
 	display: flex;
-	gap: var(--space-2);
+	gap: var(--space-1);
 	-webkit-app-region: no-drag;
 }
 
-/* ── LAYOUT (resizable panes) ── */
+/* ── LAYOUT (floating panes) ──
+ * Each pane is a rounded card sitting on the page bg, with a small gap
+ * between them. The "splitters" become invisible drag-handles in the gap.
+ */
 .layout {
 	flex: 1;
 	display: flex;
 	min-height: 0;
 	overflow: hidden;
+	padding: 12px;
+	gap: 10px;
+	background: var(--bg-1);
+	background-image: var(--surface-img);
+	background-size: 16px 16px;
 }
 .splitter {
-	flex: 0 0 4px;
-	background: var(--border);
+	flex: 0 0 0;
+	background: transparent;
 	cursor: col-resize;
 	position: relative;
 	transition: background var(--dur) var(--ease);
+	margin: 0 -5px;
+	z-index: 2;
+	width: 10px;
 }
 .splitter:hover,
 .splitter.dragging {
-	background: var(--accent);
+	background: transparent;
 }
 .splitter.h {
-	flex-basis: 4px;
+	flex-basis: 0;
 	cursor: row-resize;
+	width: 100%;
+	height: 10px;
+	margin: -5px 0;
 }
 .splitter::before {
 	content: "";
 	position: absolute;
-	inset: -3px;
+	inset: 0;
 }
-.inspector {
-	background: var(--bg-1);
+/* Hover hint on the drag handle — a subtle accent line appears in the gap. */
+.splitter:hover::after,
+.splitter.dragging::after {
+	content: "";
+	position: absolute;
+	inset: 0 4px;
+	background: var(--accent);
+	border-radius: 999px;
+	opacity: 0.45;
+}
+.splitter.h:hover::after,
+.splitter.h.dragging::after {
+	inset: 4px 0;
+}
+
+/* Floating panel base — applies only to the side tool panels.
+ * The workspace stays transparent so the dot canvas reads as the main
+ * work surface, with the sidebar + inspector floating over/beside it.
+ */
+.inspector,
+.sidebar {
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
+	min-width: 0;
+}
+
+.inspector {
 	flex: 0 0 360px;
 	min-width: 240px;
 	max-width: 700px;
 }
 .sidebar {
-	background: var(--bg-1);
-	display: flex;
-	flex-direction: column;
-	overflow: hidden;
 	flex: 0 0 300px;
 	min-width: 220px;
 	max-width: 500px;
 }
+
 .workspace {
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
 	min-width: 0;
 	flex: 1 1 auto;
+	/* No card — the canvas IS the workspace. The .layout's bg + dot grid
+	 * shows through. */
+	background: transparent;
 }
 .inspector-body {
 	flex: 1 1 auto;
@@ -102,10 +144,10 @@
 	border-bottom: none;
 }
 .section-title {
-	font-family: var(--font-display);
-	font-size: 13px;
-	font-weight: 400;
-	letter-spacing: 0.12em;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
 	text-transform: uppercase;
 	color: var(--fg-2);
 	margin-bottom: var(--space-3);
@@ -117,128 +159,144 @@
 	min-height: 0;
 }
 
-/* ── BUTTONS ── */
+/* ── BUTTONS ── pills, identical to the web platform's primary/secondary/ghost. */
 .btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: var(--space-2);
-	height: 30px;
-	padding: 0 var(--space-3);
-	border-radius: var(--radius-sm);
-	font-size: 12px;
+	height: 32px;
+	padding: 0 14px;
+	border-radius: 999px;
+	font-family: var(--font);
+	font-size: 13px;
 	font-weight: 500;
-	transition: all var(--dur) var(--ease);
 	white-space: nowrap;
 	border: 1px solid transparent;
+	transition:
+		background var(--dur) var(--ease),
+		border-color var(--dur) var(--ease),
+		opacity var(--dur) var(--ease);
 }
 .btn-primary {
 	background: var(--accent);
 	color: #fff;
-	box-shadow:
-		var(--shadow-sm),
-		inset 0 1px 0 rgba(255, 255, 255, 0.15);
+	border-color: var(--accent);
 }
 .btn-primary:hover:not(:disabled) {
-	background: var(--accent-2);
-	transform: translateY(-1px);
-	box-shadow:
-		var(--shadow-md),
-		inset 0 1px 0 rgba(255, 255, 255, 0.15);
+	opacity: 0.9;
 }
 .btn-secondary {
-	background: var(--bg-3);
-	color: var(--fg-0);
+	background: var(--bg-0);
+	color: var(--fg-1);
 	border-color: var(--border-strong);
 }
 .btn-secondary:hover:not(:disabled) {
-	background: var(--bg-4);
+	background: var(--bg-1);
+	color: var(--fg-0);
 }
 .btn-ghost {
 	background: transparent;
-	color: var(--fg-1);
+	color: var(--fg-2);
+	border-radius: var(--radius);
 }
 .btn-ghost:hover:not(:disabled) {
-	background: var(--bg-3);
+	background: var(--bg-1);
 	color: var(--fg-0);
 }
 .btn-sm {
-	height: 24px;
-	padding: 0 var(--space-2);
-	font-size: 11px;
+	height: 26px;
+	padding: 0 12px;
+	font-size: 12px;
 }
 .btn-icon {
-	width: 28px;
+	width: 32px;
+	height: 32px;
 	padding: 0;
+	border-radius: var(--radius);
 }
 
-/* ── TABS ── */
+/* ── TABS ── editorial segmented control (full-pill container, accent active state) */
 .tabs {
-	display: flex;
-	gap: var(--space-1);
-	background: var(--bg-2);
+	display: inline-flex;
+	gap: 0;
+	background: var(--bg-0);
 	padding: 3px;
-	border-radius: var(--radius-sm);
+	border-radius: 999px;
+	border: 1px solid var(--border);
 	margin-bottom: var(--space-3);
 }
 .tab {
 	flex: 1;
+	min-width: 0;
 	height: 26px;
-	padding: 0 var(--space-3);
-	border-radius: 3px;
-	font-size: 11px;
-	color: var(--fg-2);
+	padding: 0 12px;
+	border-radius: 999px;
+	font-family: var(--font);
+	font-size: 12px;
+	color: var(--fg-1);
 	font-weight: 500;
-	transition: all var(--dur) var(--ease);
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	transition:
+		background var(--dur) var(--ease),
+		color var(--dur) var(--ease);
 }
-.tab:hover {
+.tab:hover:not(.active) {
 	color: var(--fg-0);
 }
 .tab.active {
-	background: var(--bg-3);
-	color: var(--fg-0);
-	box-shadow: var(--shadow-sm);
+	background: var(--accent);
+	color: #fff;
 }
 
-/* ── INPUTS ── */
+/* ── INPUTS ── matches platform TextInput: visible border, accent halo on focus, rounded-md */
 .input,
 .select,
 .textarea {
 	width: 100%;
-	background: var(--bg-2);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
+	background: var(--bg-1);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-lg);
 	padding: 0 var(--space-3);
-	height: 32px;
+	height: 36px;
 	color: var(--fg-0);
+	font-family: var(--font);
+	font-size: 13px;
 	transition:
+		background var(--dur) var(--ease),
 		border-color var(--dur) var(--ease),
 		box-shadow var(--dur) var(--ease);
-	font-size: 12px;
+}
+.input::placeholder,
+.textarea::placeholder {
+	color: var(--fg-3);
 }
 .input:focus,
 .select:focus,
 .textarea:focus {
+	background: var(--bg-2);
 	border-color: var(--accent);
 	box-shadow: 0 0 0 3px var(--accent-bg);
 }
 .textarea {
 	height: auto;
-	padding: var(--space-2) var(--space-3);
+	padding: 10px var(--space-3);
 	font-family: var(--font-mono);
-	font-size: 11px;
+	font-size: 12px;
 	resize: vertical;
-	line-height: 1.6;
+	line-height: 1.55;
 }
 .select {
 	-webkit-appearance: none;
 	appearance: none;
 	padding-right: 28px;
-	background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' fill='%238b94a8' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+	background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath fill='%238b94a8' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
 	background-repeat: no-repeat;
 	background-position: right 10px center;
 	cursor: pointer;
@@ -248,28 +306,37 @@
 }
 .field-label {
 	display: block;
-	font-size: 11px;
-	color: var(--fg-2);
-	margin-bottom: 6px;
+	font-family: var(--font-mono);
+	font-size: 10px;
 	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+	margin-bottom: 8px;
 }
 
-/* ── DROPZONE ── */
+/* ── DROPZONE ── editorial card-like, dashed boundary, accent halo on hover */
 .dropzone {
 	position: relative;
 	border: 1.5px dashed var(--border-strong);
-	border-radius: var(--radius);
+	border-radius: var(--radius-xl);
 	padding: var(--space-5) var(--space-4);
 	text-align: center;
 	cursor: pointer;
-	transition: all var(--dur) var(--ease);
+	transition:
+		background var(--dur) var(--ease),
+		border-color var(--dur) var(--ease),
+		color var(--dur) var(--ease),
+		box-shadow var(--dur) var(--ease);
 	color: var(--fg-2);
+	background: var(--bg-1);
 }
 .dropzone:hover,
 .dropzone.drag-over {
 	border-color: var(--accent);
 	background: var(--accent-bg);
 	color: var(--fg-0);
+	box-shadow: 0 0 0 3px var(--accent-bg);
 }
 .dropzone-icon {
 	font-size: 28px;
@@ -338,15 +405,15 @@
 .progress-fill {
 	height: 100%;
 	width: 0%;
-	background: linear-gradient(90deg, var(--accent), var(--accent-2));
+	background: var(--accent);
 	border-radius: 2px;
 	transition: width 250ms var(--ease);
 }
 .progress-fill.ok {
-	background: linear-gradient(90deg, var(--ok), #6ee7b7);
+	background: var(--ok);
 }
 .progress-fill.err {
-	background: linear-gradient(90deg, var(--err), #fca5a5);
+	background: var(--err);
 }
 
 /* ── LOG ── */
@@ -388,8 +455,8 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: var(--space-3) var(--space-4);
-	background: var(--bg-1);
+	padding: 14px var(--space-5);
+	background: var(--bg-0);
 	border-bottom: 1px solid var(--border);
 	gap: var(--space-3);
 	flex-shrink: 0;
@@ -401,33 +468,49 @@
 	gap: var(--space-2);
 }
 .toolbar-title {
-	font-size: 13px;
+	font-family: var(--font);
+	font-size: 14px;
 	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--fg-0);
 }
 .toolbar-meta {
+	font-family: var(--font-mono);
 	font-size: 11px;
 	color: var(--fg-2);
 	margin-left: var(--space-2);
 }
 
-/* ── EMPTY STATE ── */
+/* ── EMPTY STATE ── editorial card-style empty state, like the web platform's <EmptyState /> */
 .empty {
 	flex: 1;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	color: var(--fg-3);
-	gap: var(--space-3);
+	color: var(--fg-2);
+	gap: 14px;
 	padding: var(--space-6);
 	text-align: center;
 }
 .empty-icon {
-	font-size: 48px;
-	opacity: 0.4;
+	width: 48px;
+	height: 48px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	color: var(--fg-3);
+	font-size: 22px;
 }
 .empty-text {
-	font-size: 13px;
+	font-family: var(--font);
+	font-size: 14px;
+	color: var(--fg-1);
+	max-width: 36ch;
+	line-height: 1.5;
 }
 
 /* ── LAYOUT A: GRID ── */
@@ -742,34 +825,36 @@
 	color: var(--warn);
 }
 
-/* ── PREVIEW ── */
+/* ── PREVIEW (lives directly on the canvas, no card chrome) ── */
 .preview {
 	flex: 1;
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
-	background: var(--bg-0);
+	background: transparent;
 }
 .preview-bar {
 	display: flex;
 	align-items: center;
 	gap: var(--space-2);
-	padding: var(--space-2) var(--space-3);
-	background: var(--bg-1);
-	border-bottom: 1px solid var(--border);
+	padding: 10px 14px;
+	background: transparent;
+	border: 0;
 }
+/* The URL / "no source loaded" status reads as a floating pill on the canvas. */
 .preview-url {
 	flex: 1;
 	font-family: var(--font-mono);
 	font-size: 11px;
 	color: var(--fg-2);
-	background: var(--bg-2);
-	padding: 6px 10px;
-	border-radius: var(--radius-sm);
+	background: var(--bg-0);
+	padding: 6px 12px;
+	border-radius: 999px;
 	border: 1px solid var(--border);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+	box-shadow: var(--shadow-sm);
 }
 .preview-frame-wrap {
 	flex: 1;
@@ -778,15 +863,13 @@
 	grid-template-rows: var(--ruler-thickness) 1fr;
 	min-height: 0;
 	overflow: hidden;
-	background: var(--bg-0);
+	background: transparent;
 }
 .ruler-corner {
-	background: var(--bg-2);
-	border-right: 1px solid var(--border);
-	border-bottom: 1px solid var(--border);
+	background: transparent;
 }
 .ruler {
-	background: var(--bg-2);
+	background: transparent;
 	color: var(--fg-3);
 	overflow: hidden;
 	font-family: var(--font-mono);
@@ -794,16 +877,14 @@
 	user-select: none;
 	-webkit-user-select: none;
 }
-.ruler-top {
-	border-bottom: 1px solid var(--border);
-}
+.ruler-top,
 .ruler-left {
-	border-right: 1px solid var(--border);
+	border: 0;
 }
+/* The work canvas — transparent so the layout's dot grid shows through. */
 .preview-content {
 	overflow: auto;
-	background-image: var(--surface-img);
-	background-size: 16px 16px;
+	background: transparent;
 	position: relative;
 }
 .rec-indicator {
@@ -1013,124 +1094,140 @@ kbd {
 	border-radius: 2px;
 }
 
+
 /* ───────────────────────────────────────────────────────────────────────── */
-/* iOS Simulator (RN snap) mode                                              */
+/* iOS Simulator (RN snap) mode — matches the redesigned floating-card UI    */
 /* ───────────────────────────────────────────────────────────────────────── */
+
+.rn-root {
+	position: fixed;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
 
 .rn-layout {
 	flex: 1;
 	display: grid;
-	grid-template-columns: 280px 1fr 240px;
+	grid-template-columns: 280px 1fr;
 	min-height: 0;
+	padding: 12px;
+	gap: 10px;
+	background: var(--bg-1);
+	background-image: var(--surface-img);
+	background-size: 16px 16px;
+	transition: grid-template-columns 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rn-layout-collapsed {
+	grid-template-columns: 0 1fr;
+	gap: 0;
+}
+.rn-layout-collapsed .rn-sidebar {
+	border: 0;
+	box-shadow: none;
+	opacity: 0;
+	pointer-events: none;
+	min-width: 0;
+	width: 0;
+}
+.rn-layout-collapsed .rn-sidebar-expand {
+	display: inline-flex;
+}
+.rn-sidebar-expand { display: none; }
+
+/* Sidebar collapse / expand chrome — sticky toggle in the corner */
+.rn-sidebar-collapse {
+	position: sticky;
+	top: 0;
+	align-self: flex-end;
+	z-index: 2;
+	margin: 8px 8px 0 auto;
+	width: 24px;
+	height: 24px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-2);
+	font-size: 13px;
+	line-height: 1;
+	cursor: pointer;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+.rn-sidebar-collapse:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
+.rn-sidebar-expand {
+	position: absolute;
+	top: 14px;
+	left: 14px;
+	z-index: 3;
+	width: 28px;
+	height: 28px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-1);
+	box-shadow: var(--shadow-sm);
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	align-items: center;
+	justify-content: center;
+}
+.rn-sidebar-expand:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
+.rn-main { position: relative; }
+
+.rn-sidebar,
+.rn-recent {
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	min-width: 0;
 }
 
 .rn-sidebar {
-	border-right: 1px solid var(--border);
-	background: var(--bg-1);
 	overflow-y: auto;
-	padding: var(--space-3);
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-4);
+}
+
+.rn-sidebar .section {
+	padding: var(--space-4);
+	border-bottom: 1px solid var(--border);
+}
+.rn-sidebar .section:last-child {
+	border-bottom: none;
 }
 
 .rn-main {
 	background: var(--bg-0);
-	background-image: var(--surface-img);
-	background-size: 18px 18px;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
 	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: var(--space-5);
+	flex-direction: column;
 	overflow: hidden;
+	min-width: 0;
 	min-height: 0;
 }
 
-.rn-recent {
-	border-left: 1px solid var(--border);
-	background: var(--bg-1);
-	overflow-y: auto;
-	display: flex;
-	flex-direction: column;
-}
-
-.rn-recent-header {
-	padding: var(--space-3) var(--space-4);
-	border-bottom: 1px solid var(--border);
-	font-size: 10px;
-	font-weight: 600;
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
-	color: var(--fg-2);
-}
-
-.rn-recent-grid {
-	display: flex;
-	flex-direction: column;
-	gap: var(--space-2);
-	padding: var(--space-3);
-}
-
-.rn-recent-empty {
-	padding: var(--space-4);
-	font-size: 11px;
-	color: var(--fg-3);
-	text-align: center;
-}
-
-.rn-thumb {
-	display: block;
-	background: var(--bg-2);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	overflow: hidden;
-	cursor: pointer;
-	padding: 0;
-	transition:
-		border-color var(--dur) var(--ease),
-		transform var(--dur) var(--ease);
-	text-align: left;
-}
-.rn-thumb:hover {
-	border-color: var(--border-strong);
-}
-.rn-thumb.active {
-	border-color: var(--accent);
-	box-shadow: 0 0 0 2px var(--accent-bg);
-}
-.rn-thumb img {
-	width: 100%;
-	display: block;
-	background: var(--bg-3);
-	aspect-ratio: 9 / 19;
-	object-fit: cover;
-}
-.rn-thumb-label {
-	display: flex;
-	gap: var(--space-2);
-	padding: var(--space-2);
-	font-size: 10px;
-	color: var(--fg-2);
-	border-top: 1px solid var(--border);
-}
-.rn-thumb-seq {
-	font-family: var(--font-mono);
-	color: var(--fg-3);
-}
-.rn-thumb-route {
-	flex: 1;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	color: var(--fg-1);
-}
-
+/* ── Bridge status panel ── */
 .rn-status {
 	display: flex;
 	align-items: flex-start;
 	gap: var(--space-3);
 	padding: var(--space-3);
-	background: var(--bg-2);
+	background: var(--bg-1);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 }
@@ -1149,21 +1246,469 @@ kbd {
 	color: var(--fg-2);
 	font-family: var(--font-mono);
 }
-
 .rn-hint {
 	margin: var(--space-3) 0 0;
 	font-size: 11px;
-	line-height: 1.5;
+	line-height: 1.55;
 	color: var(--fg-2);
 	padding: var(--space-3);
-	background: var(--bg-2);
+	background: var(--bg-1);
 	border-radius: var(--radius);
 	border: 1px dashed var(--border);
 }
 
+/* ── Project list ── */
+.rn-projects {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+.rn-projects-empty {
+	font-size: 11px;
+	color: var(--fg-3);
+	padding: var(--space-3);
+	background: var(--bg-1);
+	border: 1px dashed var(--border);
+	border-radius: var(--radius);
+	text-align: center;
+}
+.rn-project {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-2) var(--space-3);
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	font-size: 11px;
+	cursor: pointer;
+	transition: border-color var(--dur) var(--ease);
+}
+.rn-project:hover {
+	border-color: var(--border-strong);
+}
+.rn-project.active {
+	border-color: var(--accent);
+	background: var(--accent-bg);
+}
+.rn-project {
+	position: relative;
+}
+.rn-project-refresh,
+.rn-project-remove {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border-radius: 999px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--fg-3);
+	cursor: pointer;
+	opacity: 0;
+	transition:
+		opacity var(--dur) var(--ease),
+		background var(--dur) var(--ease),
+		border-color var(--dur) var(--ease),
+		color var(--dur) var(--ease),
+		transform var(--dur) var(--ease);
+	flex-shrink: 0;
+}
+.rn-project-refresh {
+	margin-left: auto;
+}
+.rn-project-remove {
+	margin-left: 0;
+}
+.rn-project-refresh svg,
+.rn-project-remove svg { display: block; pointer-events: none; }
+.rn-project:hover .rn-project-refresh,
+.rn-project-refresh:focus-visible,
+.rn-project:hover .rn-project-remove,
+.rn-project-remove:focus-visible { opacity: 1; }
+.rn-project-refresh:hover {
+	background: var(--accent-bg);
+	border-color: var(--accent);
+	color: var(--accent);
+}
+.rn-project-refresh.is-busy {
+	opacity: 1;
+	color: var(--accent);
+}
+.rn-project-refresh.is-busy svg {
+	animation: rn-spin 0.8s linear infinite;
+}
+@keyframes rn-spin {
+	to { transform: rotate(360deg); }
+}
+.rn-project-remove svg { display: block; pointer-events: none; }
+.rn-project:hover .rn-project-remove,
+.rn-project-remove:focus-visible {
+	opacity: 1;
+}
+.rn-project-remove:hover {
+	background: oklch(0.62 0.19 25);
+	border-color: oklch(0.55 0.19 25);
+	color: #fff;
+}
+.rn-project .dot.muted {
+	background: var(--fg-3);
+}
+.rn-project-meta {
+	flex: 1;
+	min-width: 0;
+}
+.rn-project-name {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--fg-0);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.rn-project-slug {
+	font-family: var(--font-mono);
+	font-size: 10px;
+	color: var(--fg-3);
+}
+
+/* ── Sidebar flow tree ── */
+.rn-flows-side {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+.rn-flows-side-empty {
+	font-size: 11px;
+	color: var(--fg-3);
+	padding: var(--space-3);
+	background: var(--bg-1);
+	border: 1px dashed var(--border);
+	border-radius: var(--radius);
+	text-align: center;
+}
+.rn-flow-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	min-height: 28px;
+	padding: 6px 10px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--fg-1);
+	font-family: var(--font);
+	font-size: 13px;
+	font-weight: 400;
+	cursor: pointer;
+	text-align: left;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.rn-flow-row:hover {
+	background: var(--bg-1);
+}
+.rn-flow-row.active {
+	background: var(--bg-2);
+	color: var(--fg-0);
+	font-weight: 500;
+}
+.rn-flow-arrow {
+	flex-shrink: 0;
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--fg-3);
+	line-height: 1;
+}
+.rn-flow-name {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.rn-flow-count {
+	flex-shrink: 0;
+	min-width: 22px;
+	height: 18px;
+	padding: 0 6px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+	color: var(--fg-2);
+}
+.rn-flow-pending {
+	flex-shrink: 0;
+	height: 18px;
+	padding: 0 6px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	background: var(--accent-subtle, oklch(0.93 0.06 254));
+	color: var(--accent, oklch(0.5 0.22 254));
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	font-variant-numeric: tabular-nums;
+}
+.rn-flow-row.active .rn-flow-count {
+	background: var(--bg-3, var(--bg-1));
+	color: var(--fg-1);
+}
+
+/* ── Lightbox (full-screen frame view, like the web frame page) ── */
+.rn-lightbox-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 9999;
+	background: color-mix(in oklch, var(--bg-0) 78%, #000 22%);
+	-webkit-backdrop-filter: blur(20px) saturate(1.4);
+	backdrop-filter: blur(20px) saturate(1.4);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	animation: rn-fade-in 160ms ease-out;
+}
+.rn-lightbox-stage {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	width: min(100vw, 1100px);
+	height: min(100vh, calc(100vh - 24px));
+	padding: 18px 24px;
+	color: var(--fg-0);
+	font-family: var(--font);
+}
+.rn-lightbox-close {
+	position: absolute;
+	top: 12px;
+	right: 14px;
+	width: 32px;
+	height: 32px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-1);
+	font-size: 18px;
+	line-height: 1;
+	cursor: pointer;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.rn-lightbox-close:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
+.rn-lightbox-header {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 2px;
+	text-align: center;
+	min-height: 40px;
+}
+.rn-lightbox-title {
+	font-size: 14px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--fg-0);
+}
+.rn-lightbox-sub {
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--fg-2);
+	font-variant-numeric: tabular-nums;
+}
+.rn-lightbox-main {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 18px;
+	min-height: 0;
+}
+.rn-lightbox-bezel {
+	position: relative;
+	height: 100%;
+	max-height: calc(100vh - 160px);
+	aspect-ratio: 450 / 920;
+	flex-shrink: 0;
+	filter: drop-shadow(0 30px 50px rgba(0, 0, 0, 0.45));
+}
+.rn-lightbox-bezel-screen {
+	position: absolute;
+	top: 2.6%;
+	left: 5.3%;
+	right: 5.3%;
+	bottom: 2.6%;
+	border-radius: 12.6%;
+	overflow-y: auto;
+	overflow-x: hidden;
+	background: #000;
+	-webkit-overflow-scrolling: touch;
+	scrollbar-width: thin;
+	scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.rn-lightbox-bezel-screen::-webkit-scrollbar {
+	width: 6px;
+}
+.rn-lightbox-bezel-screen::-webkit-scrollbar-track {
+	background: transparent;
+}
+.rn-lightbox-bezel-screen::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.18);
+	border-radius: 3px;
+}
+.rn-lightbox-bezel-screen::-webkit-scrollbar-thumb:hover {
+	background: rgba(255, 255, 255, 0.28);
+}
+.rn-lightbox-img {
+	display: block;
+	width: 100%;
+	height: auto;
+}
+.rn-lightbox-bezel-frame {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	user-select: none;
+}
+.rn-lightbox-bezel-frame-dark {
+	display: none;
+}
+[data-theme="dark"] .rn-lightbox-bezel-frame-light {
+	display: none;
+}
+[data-theme="dark"] .rn-lightbox-bezel-frame-dark {
+	display: block;
+}
+.rn-lightbox-nav {
+	width: 44px;
+	height: 44px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-1);
+	font-size: 22px;
+	line-height: 1;
+	cursor: pointer;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+.rn-lightbox-nav:hover:not(:disabled) {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
+.rn-lightbox-nav:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+.rn-lightbox-inspector {
+	flex-shrink: 0;
+	width: 240px;
+	max-height: calc(100vh - 160px);
+	overflow-y: auto;
+	padding: 16px 18px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.rn-insp-label {
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+	margin-top: 12px;
+}
+.rn-insp-label:first-of-type { margin-top: 0; }
+.rn-insp-value {
+	font-size: 12px;
+	color: var(--fg-0);
+	word-break: break-all;
+	line-height: 1.4;
+}
+.rn-insp-value-mono {
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+.rn-insp-upload {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--fg-1);
+	line-height: 1.3;
+	margin-top: 2px;
+}
+.rn-insp-dot {
+	flex-shrink: 0;
+	width: 8px;
+	height: 8px;
+	border-radius: 999px;
+	background: var(--fg-3);
+}
+.rn-insp-dot.success { background: oklch(0.65 0.15 145); }
+.rn-insp-dot.warn { background: oklch(0.75 0.15 80); }
+.rn-insp-dot.error { background: oklch(0.62 0.19 25); }
+
+.rn-lightbox-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding-top: 4px;
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--fg-2);
+}
+.rn-lightbox-counter {
+	font-weight: 500;
+	color: var(--fg-1);
+	font-variant-numeric: tabular-nums;
+}
+.rn-lightbox-hint kbd {
+	display: inline-block;
+	padding: 1px 6px;
+	margin: 0 2px;
+	border-radius: 4px;
+	border: 1px solid var(--border);
+	background: var(--bg-1);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	color: var(--fg-1);
+}
+@keyframes rn-fade-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+
+/* Brief flash on the matching grid section after sidebar click */
+@keyframes rn-flow-flash {
+	0% { box-shadow: 0 0 0 0 var(--accent-subtle, transparent); }
+	30% { box-shadow: 0 0 0 4px var(--accent-subtle, rgba(16, 114, 245, 0.18)); }
+	100% { box-shadow: 0 0 0 0 transparent; }
+}
+.rn-flow-flash {
+	animation: rn-flow-flash 900ms ease-out;
+	border-radius: 8px;
+}
+
+/* ── Session meta ── */
 .rn-session-meta {
 	padding: var(--space-2) var(--space-3);
-	background: var(--bg-2);
+	background: var(--bg-1);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	display: flex;
@@ -1183,17 +1728,19 @@ kbd {
 	color: var(--fg-1);
 }
 
+/* ── Preview ── */
 .rn-preview-stage {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	gap: var(--space-3);
 	max-height: 100%;
+	padding: var(--space-5);
 }
 .rn-preview-img {
-	max-height: calc(100vh - 200px);
+	max-height: calc(100vh - 220px);
 	max-width: 100%;
-	border-radius: var(--radius-lg);
+	border-radius: 18px;
 	box-shadow: var(--shadow-lg);
 	background: var(--bg-2);
 	display: block;
@@ -1220,57 +1767,80 @@ kbd {
 	text-align: center;
 	max-width: 360px;
 	line-height: 1.6;
+	padding: var(--space-5);
 }
 
-/* ── RN wizard modal ────────────────────────────────────────────────────── */
-.rn-projects {
+/* ── Recent thumbnails ── */
+.rn-recent-header {
+	padding: var(--space-3) var(--space-4);
+	border-bottom: 1px solid var(--border);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+}
+.rn-recent-grid {
 	display: flex;
 	flex-direction: column;
-	gap: var(--space-1);
+	gap: var(--space-2);
+	padding: var(--space-3);
 }
-.rn-projects-empty {
+.rn-recent-empty {
+	padding: var(--space-4);
 	font-size: 11px;
 	color: var(--fg-3);
-	padding: var(--space-3);
-	background: var(--bg-2);
-	border: 1px dashed var(--border);
-	border-radius: var(--radius);
 	text-align: center;
 }
-.rn-project {
-	display: flex;
-	align-items: center;
-	gap: var(--space-2);
-	padding: var(--space-2) var(--space-3);
-	background: var(--bg-2);
+.rn-thumb {
+	display: block;
+	background: var(--bg-1);
 	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	font-size: 11px;
+	border-radius: 10px;
+	overflow: hidden;
+	cursor: pointer;
+	padding: 0;
+	text-align: left;
+	transition:
+		border-color var(--dur) var(--ease),
+		transform var(--dur) var(--ease);
 }
-.rn-project.active {
+.rn-thumb:hover {
+	border-color: var(--border-strong);
+}
+.rn-thumb.active {
 	border-color: var(--accent);
-	background: var(--accent-bg);
+	box-shadow: 0 0 0 2px var(--accent-bg);
 }
-.rn-project .dot.muted {
-	background: var(--fg-3);
+.rn-thumb img {
+	width: 100%;
+	display: block;
+	background: var(--bg-2);
+	aspect-ratio: 9 / 19;
+	object-fit: cover;
 }
-.rn-project-meta {
+.rn-thumb-label {
+	display: flex;
+	gap: var(--space-2);
+	padding: var(--space-2);
+	font-size: 10px;
+	color: var(--fg-2);
+	border-top: 1px solid var(--border);
+}
+.rn-thumb-seq {
+	font-family: var(--font-mono);
+	color: var(--fg-3);
+}
+.rn-thumb-route {
 	flex: 1;
-	min-width: 0;
-}
-.rn-project-name {
-	font-size: 12px;
-	color: var(--fg-0);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-.rn-project-slug {
-	font-family: var(--font-mono);
-	font-size: 10px;
-	color: var(--fg-3);
+	color: var(--fg-1);
 }
 
+/* ── Wizard modal ── */
 .rn-modal-backdrop {
 	position: fixed;
 	inset: 0;
@@ -1282,11 +1852,11 @@ kbd {
 	padding: var(--space-4);
 }
 .rn-modal {
-	background: var(--bg-1);
+	background: var(--bg-0);
 	border: 1px solid var(--border);
-	border-radius: var(--radius-lg);
+	border-radius: 16px;
 	box-shadow: var(--shadow-lg);
-	width: 520px;
+	width: 540px;
 	max-width: 100%;
 	max-height: 90vh;
 	display: flex;
@@ -1324,7 +1894,10 @@ kbd {
 	gap: var(--space-1);
 }
 .rn-field > span {
-	font-size: 11px;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 	color: var(--fg-2);
 	font-weight: 500;
 }
@@ -1347,36 +1920,38 @@ kbd {
 	display: flex;
 	flex-direction: column;
 	gap: var(--space-1);
-	background: var(--bg-2);
+	background: var(--bg-1);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	padding: var(--space-3);
 	font-size: 11px;
+	max-height: 220px;
+	overflow-y: auto;
 }
 .rn-wizard-step {
 	display: flex;
 	gap: var(--space-2);
 	color: var(--fg-1);
 }
-.rn-wizard-step span {
+.rn-wizard-step span:first-child {
 	width: 14px;
 	text-align: center;
 	font-family: var(--font-mono);
 }
-.rn-wizard-step-ok span {
+.rn-wizard-step-ok span:first-child {
 	color: var(--ok);
 }
-.rn-wizard-step-warn span {
+.rn-wizard-step-warn span:first-child {
 	color: var(--warn);
 }
-.rn-wizard-step-error span {
+.rn-wizard-step-error span:first-child {
 	color: var(--err);
 }
 .rn-wizard-step-info {
 	color: var(--fg-2);
 }
 .rn-wizard-manual {
-	background: var(--bg-2);
+	background: var(--bg-1);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	padding: var(--space-3);
@@ -1387,7 +1962,7 @@ kbd {
 	margin-bottom: var(--space-2);
 }
 .rn-wizard-snippet {
-	background: var(--bg-0);
+	background: var(--bg-2);
 	border: 1px solid var(--border);
 	border-radius: var(--radius-sm);
 	padding: var(--space-3);
@@ -1398,4 +1973,885 @@ kbd {
 	color: var(--fg-1);
 	overflow-x: auto;
 	white-space: pre;
+}
+
+.rn-mirror-img {
+	max-width: 100%;
+	max-height: 100%;
+	width: auto;
+	height: auto;
+	object-fit: contain;
+	border-radius: 18px;
+	box-shadow: var(--shadow-lg);
+	background: var(--bg-2);
+}
+
+@keyframes rn-ripple {
+	0% {
+		transform: scale(1);
+		opacity: 0.6;
+	}
+	100% {
+		transform: scale(2.5);
+		opacity: 0;
+	}
+}
+
+/* ── Snap grid (gallery-style: iPhone bezel cards in horizontal flow strips) ── */
+.rn-grid-scroll {
+	flex: 1;
+	overflow-y: auto;
+	min-height: 0;
+}
+.rn-grid-empty {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	color: var(--fg-3);
+	font-size: 13px;
+	text-align: center;
+	padding: var(--space-5);
+}
+
+/* Overview header — mirrors gallery's "All flows" page heading. */
+.rn-overview {
+	border-bottom: 1px solid var(--border);
+	padding: 24px 32px 22px;
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 16px;
+}
+.rn-overview-meta {
+	min-width: 0;
+}
+.rn-overview-title {
+	margin: 0;
+	font-size: 22px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--fg-0);
+}
+.rn-overview-sub {
+	margin: 4px 0 0;
+	font-size: 12px;
+	color: var(--fg-2);
+}
+.rn-overview-actions {
+	display: flex;
+	gap: 8px;
+	flex-shrink: 0;
+}
+.rn-new-flow-btn {
+	white-space: nowrap;
+}
+
+/* Per-route flow section. */
+.rn-flow-section {
+	padding: 28px 0;
+	border-bottom: 1px solid var(--border);
+}
+.rn-flow-section:last-child {
+	border-bottom: none;
+}
+
+/* Sub-flow — nested inside a parent's section. Indented, smaller heading,
+   tighter padding, with a left rule so the hierarchy reads at a glance. */
+.rn-flow-subs {
+	margin: 4px 32px 0 32px;
+	padding: 8px 0 0;
+	border-top: 1px dashed var(--border);
+}
+.rn-flow-section.rn-flow-sub {
+	padding: 14px 0 8px;
+	border-bottom: 1px dashed var(--border);
+	margin-left: 16px;
+	border-left: 2px solid var(--accent-bg);
+	padding-left: 14px;
+}
+.rn-flow-section.rn-flow-sub:last-child {
+	border-bottom: none;
+}
+.rn-flow-section.rn-flow-sub .rn-flow-head {
+	padding: 0 16px 8px 0;
+}
+.rn-flow-section.rn-flow-sub .rn-flow-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--fg-1);
+}
+.rn-flow-section.rn-flow-sub .rn-flow-id {
+	font-size: 9px;
+}
+.rn-flow-section.rn-flow-sub .rn-strip {
+	padding: 18px 0 38px;
+}
+
+/* + Sub-flow button — small ghost pill, less prominent than the trash. */
+.rn-flow-add-sub {
+	font-size: 11px;
+}
+.rn-flow-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 0 32px 12px;
+}
+/* Grab handle for flow reordering. */
+.rn-flow-grab {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 22px;
+	color: var(--fg-3);
+	font-size: 14px;
+	letter-spacing: -2px;
+	cursor: grab;
+	user-select: none;
+	border-radius: var(--radius);
+	transition:
+		color var(--dur) var(--ease),
+		background var(--dur) var(--ease);
+	flex-shrink: 0;
+	align-self: center;
+}
+.rn-flow-grab:hover {
+	color: var(--fg-0);
+	background: var(--bg-1);
+}
+.rn-flow-grab:active {
+	cursor: grabbing;
+}
+.rn-flow-section.flow-dragging {
+	opacity: 0.5;
+	transform: scale(0.985);
+	transition: transform 160ms ease-out, opacity 160ms ease-out;
+}
+/* Drop indicator above/below a flow section during reorder. */
+.rn-flow-section.drop-above,
+.rn-flow-section.drop-below {
+	position: relative;
+}
+.rn-flow-section.drop-above::before,
+.rn-flow-section.drop-below::after {
+	content: "";
+	position: absolute;
+	left: 16px;
+	right: 16px;
+	height: 4px;
+	border-radius: 4px;
+	background: var(--accent);
+	box-shadow: 0 0 0 5px var(--accent-subtle, rgba(16, 114, 245, 0.18));
+	animation: rn-drop-pulse 900ms ease-in-out infinite;
+	pointer-events: none;
+	z-index: 5;
+}
+.rn-flow-section.drop-above::before { top: -6px; }
+.rn-flow-section.drop-below::after { bottom: -6px; }
+@keyframes rn-drop-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.55; }
+}
+.rn-flow-title {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--fg-0);
+	letter-spacing: -0.005em;
+}
+.rn-flow-id {
+	margin: 2px 0 0;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	color: var(--fg-3);
+}
+.rn-flow-count {
+	font-size: 11px;
+	color: var(--fg-2);
+	white-space: nowrap;
+}
+.rn-flow-actions {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-shrink: 0;
+}
+/* Flow-delete trash button — clear destructive-action visual.
+   Filled with red on hover so it reads as "delete". */
+.rn-flow-delete {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border-radius: 999px;
+	border: 1px solid var(--border-strong);
+	background: var(--bg-0);
+	color: var(--fg-2);
+	cursor: pointer;
+	transition:
+		background var(--dur) var(--ease),
+		border-color var(--dur) var(--ease),
+		color var(--dur) var(--ease),
+		transform var(--dur) var(--ease);
+}
+.rn-flow-delete svg {
+	display: block;
+	pointer-events: none; /* clicks always reach the button */
+}
+.rn-flow-delete:hover {
+	background: oklch(0.62 0.19 25);
+	border-color: oklch(0.55 0.19 25);
+	color: #fff;
+	transform: scale(1.06);
+}
+
+/* Editable flow title — looks like a heading until clicked, then becomes
+   a text input with an underline. */
+.rn-flow-title[contenteditable="plaintext-only"] {
+	cursor: text;
+	border-radius: var(--radius);
+	padding: 1px 4px;
+	margin: -1px -4px;
+	transition:
+		background var(--dur) var(--ease),
+		box-shadow var(--dur) var(--ease);
+}
+.rn-flow-title[contenteditable="plaintext-only"]:hover {
+	background: var(--bg-1);
+}
+.rn-flow-title.editing {
+	background: var(--bg-1);
+	box-shadow: 0 0 0 2px var(--accent-bg);
+	outline: none;
+}
+
+/* Placeholder card — declared screen that hasn't been captured yet.
+   Gray dashed bezel, hint text inside, distinct from real snap cards. */
+.rn-card.rn-placeholder {
+	cursor: default;
+	opacity: 0.65;
+}
+.rn-card.rn-placeholder:hover {
+	opacity: 0.85;
+	transform: none;
+}
+.rn-bezel-placeholder .rn-bezel-screen {
+	background: var(--bg-1);
+	border-radius: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.rn-placeholder-hint {
+	color: var(--fg-3);
+	font-family: var(--font);
+	font-size: 11px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	user-select: none;
+}
+.rn-card.rn-placeholder .rn-bezel-frame-light,
+.rn-card.rn-placeholder .rn-bezel-frame-dark {
+	opacity: 0.5;
+}
+.rn-card.rn-placeholder .rn-card-name {
+	color: var(--fg-1);
+}
+.rn-card.rn-placeholder .rn-card-sub {
+	color: var(--fg-3);
+	font-family: var(--font);
+	font-size: 10px;
+}
+
+/* Empty-flow placeholder inside the strip. */
+.rn-strip-empty {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 200px;
+	min-width: 280px;
+	color: var(--fg-3);
+	font-size: 12px;
+	border: 1.5px dashed var(--border-strong);
+	border-radius: var(--radius-lg);
+	background: transparent;
+	pointer-events: none; /* let drops fall through to the strip */
+}
+
+/* Active drop target on a strip (cross-flow move). */
+.rn-strip.drop-target {
+	background: var(--accent-subtle, var(--accent-bg));
+	border-radius: var(--radius-lg);
+	box-shadow:
+		inset 0 0 0 2px var(--accent),
+		0 0 0 4px var(--accent-subtle, rgba(16, 114, 245, 0.16));
+	animation: rn-drop-target-pulse 1100ms ease-in-out infinite;
+}
+@keyframes rn-drop-target-pulse {
+	0%, 100% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 4px var(--accent-subtle, rgba(16, 114, 245, 0.16)); }
+	50% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 8px var(--accent-subtle, rgba(16, 114, 245, 0.10)); }
+}
+
+/* Horizontal strip — like gallery's <JourneyStrip>. Scrolls horizontally
+   when there are more cards than fit; chevrons separate cards.
+   Generous vertical padding so the bezel's drop-shadow doesn't get
+   clipped by the strip's overflow-x box (which forces overflow-y to
+   clip too). */
+.rn-strip {
+	list-style: none;
+	margin: 0;
+	padding: 32px 32px 50px;
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	overflow-x: auto;
+	scrollbar-width: thin;
+}
+.rn-strip::-webkit-scrollbar {
+	height: 8px;
+}
+.rn-strip::-webkit-scrollbar-thumb {
+	background: var(--border-strong);
+	border-radius: 4px;
+}
+.rn-strip-item {
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	flex-shrink: 0;
+	position: relative;
+}
+/* Drop indicator — accent vertical bar on the side the card will land. */
+.rn-strip-item.drop-before::before,
+.rn-strip-item.drop-after::after {
+	content: "";
+	position: absolute;
+	top: 4px;
+	bottom: 24px;
+	width: 4px;
+	background: var(--accent);
+	border-radius: 4px;
+	box-shadow: 0 0 0 5px var(--accent-subtle, rgba(16, 114, 245, 0.18));
+	pointer-events: none;
+	animation: rn-drop-pulse 900ms ease-in-out infinite;
+}
+.rn-strip-item.drop-before::before {
+	left: -12px;
+}
+.rn-strip-item.drop-after::after {
+	right: -12px;
+}
+
+/* Card being dragged — ghost-out so the drop indicators read clearly. */
+.rn-card[draggable="true"]:active {
+	cursor: grabbing;
+}
+.rn-card.dragging {
+	opacity: 0.45;
+	transform: scale(0.96);
+	transition: transform 120ms ease-out, opacity 120ms ease-out;
+}
+.rn-chevron {
+	font-size: 22px;
+	line-height: 1;
+	color: var(--fg-3);
+	flex-shrink: 0;
+	user-select: none;
+}
+
+/* Card — bezel + step badge + small label below. */
+.rn-card {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 0;
+	background: transparent;
+	border: none;
+	cursor: grab;
+	text-align: left;
+	position: relative;
+	transition:
+		transform var(--dur) var(--ease),
+		opacity var(--dur) var(--ease);
+}
+.rn-card:hover {
+	transform: translateY(-3px);
+}
+.rn-card:active {
+	cursor: grabbing;
+}
+.rn-card.dragging {
+	opacity: 0.4;
+	transform: scale(0.98);
+	cursor: grabbing;
+}
+.rn-step-badge {
+	position: absolute;
+	top: -8px;
+	left: -8px;
+	z-index: 2;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 999px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+	color: var(--fg-2);
+	box-shadow: var(--shadow-sm);
+}
+.rn-card:hover .rn-step-badge {
+	border-color: var(--border-strong);
+	color: var(--fg-0);
+}
+
+/* Upload status pip — bottom-LEFT of the bezel screen so it sits on the
+   image and doesn't collide with the delete × in the top-right.
+   pending = neutral hairline / failed = amber / uploaded = green check. */
+.rn-upload-badge {
+	position: absolute;
+	bottom: 8px;
+	left: 8px;
+	z-index: 2;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 999px;
+	font-family: var(--font);
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-3);
+	box-shadow: var(--shadow-sm);
+}
+.rn-upload-pending {
+	color: var(--fg-3);
+}
+.rn-upload-uploaded {
+	background: oklch(0.72 0.18 145);
+	color: #fff;
+	border-color: oklch(0.62 0.18 145);
+}
+.rn-upload-failed {
+	background: oklch(0.72 0.19 50);
+	color: #fff;
+	border-color: oklch(0.62 0.19 50);
+}
+
+/* Per-card delete (×) — hidden until you hover the card; brightens to
+   red on hover, always shown when keyboard-focused. */
+.rn-card-delete {
+	position: absolute;
+	top: -10px;
+	right: -10px;
+	z-index: 3;
+	width: 24px;
+	height: 24px;
+	border-radius: 999px;
+	border: 1px solid var(--border-strong);
+	background: var(--bg-0);
+	color: var(--fg-2);
+	font-size: 16px;
+	line-height: 1;
+	font-weight: 400;
+	cursor: pointer;
+	box-shadow: var(--shadow-sm);
+	opacity: 0;
+	pointer-events: none;
+	transition:
+		opacity var(--dur) var(--ease),
+		transform var(--dur) var(--ease),
+		background var(--dur) var(--ease),
+		color var(--dur) var(--ease),
+		border-color var(--dur) var(--ease);
+}
+.rn-card:hover .rn-card-delete,
+.rn-card-delete:focus-visible {
+	opacity: 1;
+	pointer-events: auto;
+}
+.rn-card-delete:hover {
+	background: oklch(0.62 0.19 25);
+	border-color: oklch(0.55 0.19 25);
+	color: #fff;
+	transform: scale(1.08);
+}
+
+
+/* Toast stack — bottom-right corner, surfaces log events while the user
+   works (refresh results, push outcomes, errors, etc.). */
+.rn-toast-stack {
+	position: fixed;
+	bottom: 18px;
+	right: 18px;
+	z-index: 950;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-width: min(380px, calc(100vw - 36px));
+	pointer-events: none;
+}
+.rn-toast {
+	pointer-events: auto;
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	box-shadow: var(--shadow-md, 0 8px 22px rgba(0, 0, 0, 0.12));
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--fg-1);
+	animation: rn-toast-in 0.18s var(--ease) both;
+}
+.rn-toast.rn-toast-success {
+	border-left: 3px solid oklch(0.65 0.18 145);
+}
+.rn-toast.rn-toast-error {
+	border-left: 3px solid oklch(0.62 0.19 25);
+	color: var(--fg-0);
+}
+.rn-toast.rn-toast-warn {
+	border-left: 3px solid oklch(0.78 0.16 80);
+}
+.rn-toast.rn-toast-info {
+	border-left: 3px solid var(--accent);
+}
+.rn-toast-close {
+	margin-left: auto;
+	background: transparent;
+	border: none;
+	color: var(--fg-3);
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	padding: 0 2px;
+	flex-shrink: 0;
+}
+.rn-toast-close:hover { color: var(--fg-0); }
+.rn-toast.rn-toast-leaving {
+	animation: rn-toast-out 0.22s var(--ease) both;
+}
+@keyframes rn-toast-in {
+	from { opacity: 0; transform: translateY(8px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+@keyframes rn-toast-out {
+	to { opacity: 0; transform: translateY(8px); }
+}
+
+/* In-app confirm dialog — used by the push-to-web replace flow.
+   WKWebView blocks window.confirm, so we render our own. */
+.rn-confirm-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 1000;
+	background: oklch(0.10 0.005 260 / 0.55);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	backdrop-filter: blur(2px);
+}
+.rn-confirm-dialog {
+	min-width: 380px;
+	max-width: 480px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 14px;
+	box-shadow: var(--shadow-lg, 0 20px 50px rgba(0,0,0,0.25));
+	padding: 22px 22px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+.rn-confirm-title {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: -0.005em;
+	color: var(--fg-0);
+}
+.rn-confirm-body {
+	margin: 0;
+	font-size: 13px;
+	line-height: 1.55;
+	color: var(--fg-1);
+}
+.rn-confirm-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 6px;
+}
+.rn-confirm-danger {
+	background: oklch(0.62 0.19 25);
+	border-color: oklch(0.55 0.19 25);
+}
+.rn-confirm-danger:hover:not(:disabled) {
+	opacity: 0.9;
+	background: oklch(0.58 0.20 25);
+}
+
+/* Push dialog: confirm dialog extended with a commit-message textarea */
+.rn-push-dialog {
+	min-width: 460px;
+	max-width: 560px;
+}
+.rn-push-field-label {
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+	margin-top: 4px;
+}
+.rn-push-textarea {
+	width: 100%;
+	min-height: 64px;
+	resize: vertical;
+	font-family: var(--font);
+	font-size: 13px;
+	line-height: 1.5;
+}
+.rn-push-hint {
+	margin: -2px 0 0;
+	font-size: 11px;
+	color: var(--fg-3);
+}
+
+/* Keyboard shortcut overlay (`?` to toggle). */
+.rn-shortcut-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 9500;
+	background: color-mix(in oklch, var(--bg-0) 76%, #000 24%);
+	-webkit-backdrop-filter: blur(16px) saturate(1.4);
+	backdrop-filter: blur(16px) saturate(1.4);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	animation: rn-fade-in 160ms ease-out;
+}
+.rn-shortcut-card {
+	position: relative;
+	width: min(680px, 100%);
+	max-height: calc(100vh - 48px);
+	overflow-y: auto;
+	padding: 26px 28px;
+	border-radius: 14px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+	color: var(--fg-0);
+}
+.rn-shortcut-title {
+	margin: 0 0 18px;
+	font-size: 16px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+.rn-shortcut-close {
+	position: absolute;
+	top: 14px;
+	right: 14px;
+	width: 28px;
+	height: 28px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--bg-0);
+	color: var(--fg-1);
+	font-size: 16px;
+	line-height: 1;
+	cursor: pointer;
+}
+.rn-shortcut-close:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
+.rn-shortcut-groups {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 22px 28px;
+}
+.rn-shortcut-group-title {
+	margin: 0 0 8px;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--fg-2);
+}
+.rn-shortcut-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.rn-shortcut-list li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	font-size: 13px;
+}
+.rn-shortcut-label {
+	color: var(--fg-1);
+}
+.rn-shortcut-keys {
+	display: inline-flex;
+	gap: 4px;
+}
+.rn-shortcut-keys kbd {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 22px;
+	height: 22px;
+	padding: 0 6px;
+	border-radius: 5px;
+	border: 1px solid var(--border);
+	background: var(--bg-1);
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--fg-0);
+}
+
+/* Snap-just-arrived shimmer on the new card. */
+@keyframes rn-card-shimmer {
+	0% { box-shadow: 0 0 0 0 var(--accent-subtle, transparent); }
+	30% { box-shadow: 0 0 0 4px var(--accent-subtle, rgba(16, 114, 245, 0.22)); }
+	100% { box-shadow: 0 0 0 0 transparent; }
+}
+.rn-card.rn-card-fresh {
+	animation: rn-card-shimmer 900ms ease-out;
+	border-radius: 12px;
+}
+
+/* Push-to-web button busy + state visuals. */
+.btn.is-busy {
+	cursor: progress;
+	opacity: 0.85;
+}
+.btn.is-busy::after {
+	content: "";
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	margin-left: 6px;
+	border: 1.5px solid currentColor;
+	border-top-color: transparent;
+	border-radius: 50%;
+	animation: rn-spin 0.7s linear infinite;
+	vertical-align: middle;
+}
+@keyframes rn-spin {
+	to { transform: rotate(360deg); }
+}
+
+/* iPhone 17 bezel sandwich. Source PNG is 450x920; inner screen 402x874
+   (inset 5.33% / 2.50%). Matches gallery's <IPhoneBezel> exactly. */
+.rn-bezel {
+	position: relative;
+	height: 320px;
+	aspect-ratio: 450 / 920;
+	flex-shrink: 0;
+	filter:
+		drop-shadow(0 18px 32px rgba(15, 15, 20, 0.18))
+		drop-shadow(0 6px 12px rgba(15, 15, 20, 0.10));
+	transition: filter var(--dur) var(--ease);
+}
+[data-theme="dark"] .rn-bezel {
+	filter:
+		drop-shadow(0 18px 32px rgba(0, 0, 0, 0.5))
+		drop-shadow(0 6px 12px rgba(0, 0, 0, 0.3));
+}
+.rn-card:hover .rn-bezel {
+	filter:
+		drop-shadow(0 28px 44px rgba(15, 15, 20, 0.28))
+		drop-shadow(0 8px 14px rgba(15, 15, 20, 0.14));
+}
+[data-theme="dark"] .rn-card:hover .rn-bezel {
+	filter:
+		drop-shadow(0 28px 44px rgba(0, 0, 0, 0.65))
+		drop-shadow(0 8px 14px rgba(0, 0, 0, 0.4));
+}
+.rn-bezel-screen {
+	position: absolute;
+	top: 2.5%;
+	left: 5.33%;
+	width: 89.33%;
+	height: 95%;
+	overflow: hidden;
+	border-radius: min(13% / 2, 60px);
+	background: #000;
+}
+.rn-bezel-img {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	object-position: top center;
+}
+.rn-bezel-frame {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	user-select: none;
+}
+.rn-bezel-frame-light {
+	display: block;
+}
+.rn-bezel-frame-dark {
+	display: none;
+}
+[data-theme="dark"] .rn-bezel-frame-light {
+	display: none;
+}
+[data-theme="dark"] .rn-bezel-frame-dark {
+	display: block;
+}
+
+.rn-card-label {
+	max-width: calc(320px * 0.508);
+	padding: 0 2px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.rn-card-name {
+	margin: 0;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--fg-0);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.rn-card-sub {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	color: var(--fg-3);
 }

@@ -38,6 +38,7 @@ export interface RunResult {
  * `imagePath` is an absolute path; the view loads it via file:// URL.
  */
 export interface RnSnapInfo {
+	sessionId: string;
 	sequence: number;
 	projectId: string;
 	route: string;
@@ -46,6 +47,30 @@ export interface RnSnapInfo {
 	capturedAt: string;
 	imagePath: string;
 	uploaded?: { ok: true; buildId: string } | { ok: false; error: string };
+	/** User-assigned sort position from drag-and-drop. Undefined = no override. */
+	position?: number;
+	/** Which flow this snap belongs to. Always set. */
+	flowId: string;
+}
+
+export interface RnFlowScreen {
+	declaredId: string;
+	name: string;
+	route: string;
+	stateHash?: string;
+}
+
+export interface RnFlow {
+	id: string;
+	name: string;
+	/** Slug of the project that owns this flow. */
+	projectId: string;
+	autoRoute?: string;
+	parentFlowId?: string;
+	/** Stable id from snap-flows.ts when the flow came from a declaration. */
+	declaredId?: string;
+	/** Expected screens, rendered as placeholders until snaps fill them. */
+	screens?: RnFlowScreen[];
 }
 
 export interface RnProjectInfo {
@@ -140,16 +165,97 @@ export type ScenarioRunnerRPC = {
 					clientCount: number;
 					projects: string[];
 					sessionId: string;
+					pendingUploads: number;
 					snaps: RnSnapInfo[];
+					flows: RnFlow[];
 				};
 			};
 			performSnap: {
 				params: Record<string, never>;
-				response: { ok: true; snap: RnSnapInfo } | { ok: false; error: string };
+				response:
+					| {
+							ok: true;
+							snap: RnSnapInfo;
+							/** Which path produced the image: bridge full-page or simctl viewport. */
+							captureMethod?: "full-page" | "simctl";
+							/** Reason the bridge full-page path didn't run, when fallback to simctl happened. */
+							captureNote?: string;
+					  }
+					| { ok: false; error: string };
+			};
+			uploadPending: {
+				params: { force?: boolean };
+				response: {
+					ok: true;
+					uploaded: number;
+					failed: number;
+					errors: string[];
+				};
+			};
+			pushAll: {
+				params: { projectSlug?: string; message?: string };
+				response: {
+					synced: number;
+					failed: number;
+					errors: string[];
+				};
+			};
+			deleteSnap: {
+				params: { sessionId: string; sequence: number };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			reorderSnaps: {
+				params: {
+					flowId: string;
+					ordered: Array<{ sessionId: string; sequence: number }>;
+				};
+				response: { ok: true };
+			};
+			createFlow: {
+				params: {
+					name: string;
+					projectId: string;
+					parentFlowId?: string;
+				};
+				response: { ok: true; flow: RnFlow };
+			};
+			renameFlow: {
+				params: { flowId: string; name: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			moveSnapsToFlow: {
+				params: {
+					snapIds: Array<{ sessionId: string; sequence: number }>;
+					toFlowId: string;
+				};
+				response: { ok: true; moved: number };
+			};
+			deleteFlow: {
+				params: { flowId: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			reorderFlows: {
+				params: { orderedIds: string[] };
+				response: { ok: true };
 			};
 			resetSnapSession: {
 				params: Record<string, never>;
 				response: { ok: true; sessionId: string };
+			};
+			mirrorSimulator: {
+				params: Record<string, never>;
+				response:
+					| { ok: true; pngBase64: string }
+					| { ok: false; error: string };
+			};
+			forwardTap: {
+				params: {
+					mirrorX: number;
+					mirrorY: number;
+					mirrorWidth: number;
+					mirrorHeight: number;
+				};
+				response: { ok: true } | { ok: false; error: string };
 			};
 			pickRepoPath: {
 				params: Record<string, never>;
@@ -158,6 +264,21 @@ export type ScenarioRunnerRPC = {
 			listProjects: {
 				params: Record<string, never>;
 				response: { projects: RnProjectInfo[] };
+			};
+			removeProject: {
+				params: { slug: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			refreshProjectFlows: {
+				params: { slug: string };
+				response:
+					| {
+							ok: true;
+							output: string;
+							flowsFound?: number;
+							screensFound?: number;
+					  }
+					| { ok: false; error: string };
 			};
 			initProject: {
 				params: {

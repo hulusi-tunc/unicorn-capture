@@ -1,22 +1,33 @@
 import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { SessionRecord, SnapRecord } from "./snap-orchestrator";
+import type { Flow, SessionRecord, SnapRecord } from "./snap-orchestrator";
 
 /**
- * Shape the gallery platform's intake endpoint expects. Our session-based
- * snap model is collapsed into a single "snaps" flow, with frame_id derived
- * from route+stateHash so re-snaps of the same screen accumulate as
- * versions of the same frame (and comments persist).
+ * Shape the gallery platform's intake endpoint expects. Each user-facing
+ * flow becomes its own row; sub-flows carry their `parentFlowId` so the
+ * platform can render the same parent/child tree as capture.
  */
 export interface PlatformManifest {
 	projectId: string;
 	buildSha: string;
 	capturedAt: string;
 	platform: "ios" | "android" | "web";
+	/** Optional human note shown in the version history (e.g. "Booking flow added"). */
+	message?: string;
 	flows: Array<{
 		id: string;
 		name: string;
-		frames: Array<{ id: string; name: string; image: string }>;
+		parentFlowId?: string;
+		autoRoute?: string;
+		/** Index of this flow among siblings (display order). */
+		position?: number;
+		frames: Array<{
+			id: string;
+			name: string;
+			image: string;
+			/** Index of this frame within its flow (display order). */
+			position?: number;
+		}>;
 	}>;
 }
 
@@ -28,6 +39,29 @@ export interface UploadOptions {
 	/** Local out dir; image paths in the manifest are relative to this. */
 	outDir: string;
 	session: SessionRecord;
+	/**
+	 * The full list of flows from the orchestrator's manifest. Used to
+	 * resolve each snap's flowId into a flow with name + parentFlowId
+	 * for the upload payload. Pass an empty array to fall back to the
+	 * legacy "All screens" bundling.
+	 */
+	flows: readonly Flow[];
+	/**
+	 * EVERY snap from every session — used to compute each frame's
+	 * display position WITHIN ITS FLOW. Without this, single-snap uploads
+	 * would always claim position=0 and the web view wouldn't reflect
+	 * the user's drag-reorder. Pass `orch.listAllSnaps()`.
+	 */
+	allSnaps: readonly SnapRecord[];
+	/**
+	 * When true, this upload represents the COMPLETE current state — the
+	 * server wipes existing frames + builds for this app before inserting.
+	 * For chunked uploads, replace=true is set only on the FIRST batch;
+	 * later batches must append (not wipe again).
+	 */
+	replace?: boolean;
+	/** Optional commit-message-style note saved as builds.message. */
+	message?: string;
 	log?: (msg: string) => void;
 }
 
@@ -93,13 +127,14 @@ function sanitize(s: string, fallback = "x"): string {
 }
 
 /**
- * Build a stable frame ID from the navigation stack. We use navStack rather
- * than the resolved pathname because:
- *   - "/", navStack=[]               (root/welcome, pre-auth)
- *   - "/", navStack=["(tabs)"]       (home tab, post-auth)
- *   are different screens but collapse to the same pathname.
- * Dynamic params like "[id]" are stripped — `/reservation/abc123` and
- * `/reservation/xyz789` are the same screen.
+ * Build a unique-per-snap frame ID. Each captured snap is its own card in
+ * the desktop view, so each one needs to round-trip to a distinct row on
+ * the platform — even when two snaps cover the same screen state (scroll
+ * position, popup variations, deliberate re-takes).
+ *
+ * Format: `<route-id>--<sessionId-tail>-<sequence>`. The route-id keeps
+ * the frame name human-readable in the DB; the suffix makes it unique
+ * and stable across re-uploads of the same snap.
  */
 function frameIdFromSnap(snap: SnapRecord): string {
 	const stack = snap.navStack ?? [];
@@ -110,13 +145,16 @@ function frameIdFromSnap(snap: SnapRecord): string {
 		if (seg.startsWith("(") && seg.endsWith(")")) continue; // route groups
 		parts.push(seg.toLowerCase());
 	}
-	const id =
+	const routeId =
 		parts.length === 0
 			? stack.length === 0
 				? "welcome"
 				: "home"
 			: parts.join("-");
-	return `${sanitize(id, "screen")}--${sanitize(snap.stateHash, "default")}`;
+	// Take the trailing 8 chars of the sessionId — enough to disambiguate
+	// across sessions without bloating the row keys.
+	const sessionTail = snap.sessionId.slice(-8);
+	return `${sanitize(routeId, "screen")}--${sanitize(sessionTail, "s")}-${snap.sequence}`;
 }
 
 /**
@@ -136,28 +174,89 @@ function frameNameFromSnap(snap: SnapRecord): string {
 		.join(" / ");
 }
 
+/**
+ * Build a frame-position lookup keyed on (sessionId#sequence). The position
+ * is the snap's index inside its flow, after sorting all sibling snaps by
+ * (position, capturedAt) — the same sort key the desktop view uses.
+ */
+function buildFramePositionIndex(
+	allSnaps: readonly SnapRecord[],
+): Map<string, number> {
+	const byFlow = new Map<string, SnapRecord[]>();
+	for (const s of allSnaps) {
+		const list = byFlow.get(s.flowId) ?? [];
+		list.push(s);
+		byFlow.set(s.flowId, list);
+	}
+	const out = new Map<string, number>();
+	for (const list of byFlow.values()) {
+		list.sort((a, b) => {
+			const ap = a.position ?? Number.POSITIVE_INFINITY;
+			const bp = b.position ?? Number.POSITIVE_INFINITY;
+			if (ap !== bp) return ap - bp;
+			return a.capturedAt.localeCompare(b.capturedAt);
+		});
+		list.forEach((s, i) => out.set(`${s.sessionId}#${s.sequence}`, i));
+	}
+	return out;
+}
+
 export function sessionToPlatformManifest(
 	session: SessionRecord,
+	flows: readonly Flow[],
+	allSnaps: readonly SnapRecord[],
 ): PlatformManifest | null {
 	if (session.snaps.length === 0) return null;
 	const first = session.snaps[0];
 	if (!first) return null;
+
+	const flowById = new Map(flows.map((f) => [f.id, f]));
+	const flowOrder = new Map(flows.map((f, i) => [f.id, i]));
+	const framePositions = buildFramePositionIndex(allSnaps);
+
+	type Bucket = PlatformManifest["flows"][number];
+	const grouped = new Map<string, Bucket>();
+	for (const snap of session.snaps) {
+		const flow = flowById.get(snap.flowId);
+		const id = flow?.id ?? snap.flowId ?? "snaps";
+		const name = flow?.name ?? "All screens";
+		let bucket = grouped.get(id);
+		if (!bucket) {
+			bucket = {
+				id,
+				name,
+				parentFlowId: flow?.parentFlowId,
+				autoRoute: flow?.autoRoute,
+				position: flowOrder.get(id),
+				frames: [],
+			};
+			grouped.set(id, bucket);
+		}
+		bucket.frames.push({
+			id: frameIdFromSnap(snap),
+			name: frameNameFromSnap(snap),
+			image: snap.image,
+			position: framePositions.get(`${snap.sessionId}#${snap.sequence}`),
+		});
+	}
+
+	// Emit groups in the orchestrator's flow order; orphans go at the end.
+	const orderedFlows: PlatformManifest["flows"] = [];
+	for (const f of flows) {
+		const g = grouped.get(f.id);
+		if (g) {
+			orderedFlows.push(g);
+			grouped.delete(f.id);
+		}
+	}
+	for (const g of grouped.values()) orderedFlows.push(g);
+
 	return {
 		projectId: first.projectId,
 		buildSha: session.sessionId,
 		capturedAt: session.startedAt,
 		platform: first.platform,
-		flows: [
-			{
-				id: "snaps",
-				name: "All screens",
-				frames: session.snaps.map((s) => ({
-					id: frameIdFromSnap(s),
-					name: frameNameFromSnap(s),
-					image: s.image,
-				})),
-			},
-		],
+		flows: orderedFlows,
 	};
 }
 
@@ -174,16 +273,31 @@ export async function uploadSession(
 	opts: UploadOptions,
 ): Promise<UploadResult> {
 	const log = opts.log ?? (() => {});
-	const fullManifest = sessionToPlatformManifest(opts.session);
+	const fullManifest = sessionToPlatformManifest(
+		opts.session,
+		opts.flows,
+		opts.allSnaps,
+	);
 	if (!fullManifest)
 		return { ok: false, error: "Session has no snaps to upload." };
-	const allFrames = fullManifest.flows[0]?.frames ?? [];
-	if (allFrames.length === 0)
+
+	// Flatten frames across all flows so we can batch by count, then
+	// re-bucket each batch into its source flows. Each batch keeps the
+	// same buildSha so the platform upserts the build, and frames
+	// upsert across batches by their stable (flow_id, frame_id) key.
+	type FlowMeta = Omit<PlatformManifest["flows"][number], "frames">;
+	type Frame = PlatformManifest["flows"][number]["frames"][number];
+	const items: Array<{ flow: FlowMeta; frame: Frame }> = [];
+	for (const flow of fullManifest.flows) {
+		const { frames, ...meta } = flow;
+		for (const frame of frames) items.push({ flow: meta, frame });
+	}
+	if (items.length === 0)
 		return { ok: false, error: "Session has no frames to upload." };
 
-	const batches: (typeof allFrames)[] = [];
-	for (let i = 0; i < allFrames.length; i += MAX_FRAMES_PER_BATCH) {
-		batches.push(allFrames.slice(i, i + MAX_FRAMES_PER_BATCH));
+	const batches: (typeof items)[] = [];
+	for (let i = 0; i < items.length; i += MAX_FRAMES_PER_BATCH) {
+		batches.push(items.slice(i, i + MAX_FRAMES_PER_BATCH));
 	}
 
 	let totalUploaded = 0;
@@ -191,27 +305,35 @@ export async function uploadSession(
 	let lastAppSlug = "";
 
 	for (let i = 0; i < batches.length; i++) {
-		const frames = batches[i];
-		if (!frames) continue;
+		const batch = batches[i];
+		if (!batch) continue;
+		const flowsInBatch = new Map<string, PlatformManifest["flows"][number]>();
+		for (const it of batch) {
+			let bucket = flowsInBatch.get(it.flow.id);
+			if (!bucket) {
+				bucket = { ...it.flow, frames: [] };
+				flowsInBatch.set(it.flow.id, bucket);
+			}
+			bucket.frames.push(it.frame);
+		}
 		const batchManifest: PlatformManifest = {
 			...fullManifest,
-			flows: [
-				{
-					id: fullManifest.flows[0]!.id,
-					name: fullManifest.flows[0]!.name,
-					frames,
-				},
-			],
+			flows: [...flowsInBatch.values()],
+			// Only stamp message on the first batch — server creates the build
+			// then; later batches go through the existing-build update branch.
+			...(opts.message && i === 0 ? { message: opts.message } : {}),
 		};
 		const result = await uploadOne({
-			url: opts.url,
+			// Replace=true only on the FIRST batch — later batches must
+			// append, otherwise each one would wipe what the previous wrote.
+			url: opts.replace && i === 0 ? `${opts.url}?replace=true` : opts.url,
 			token: opts.token,
 			outDir: opts.outDir,
 			manifest: batchManifest,
 			label:
 				batches.length === 1
-					? `${frames.length} frame(s)`
-					: `batch ${i + 1}/${batches.length} (${frames.length} frame${frames.length === 1 ? "" : "s"})`,
+					? `${batch.length} frame(s)`
+					: `batch ${i + 1}/${batches.length} (${batch.length} frame${batch.length === 1 ? "" : "s"})`,
 			log,
 		});
 		if (!result.ok) return result;

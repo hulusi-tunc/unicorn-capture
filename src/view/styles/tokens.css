@@ -1,101 +1,143 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Unicorn Capture — editorial design tokens.
+ *
+ * Mirrors the gallery web platform (~/Unicorn Studio/gallery/apps/platform)
+ * so the desktop app and the website read as one product.
+ *
+ * Stack:
+ *   - Space Grotesk (sans + display)
+ *   - Space Mono (monospace / labels)
+ *   - OKLCH neutral palette (cool 260° hue)
+ *   - Single Hubera-blue accent (#1072F5 ≈ oklch(0.5 0.22 254))
+ *   - NO gradients anywhere (flat fills + SVG dot grid for canvas surfaces)
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* Default = LIGHT (white page), matches platform default. */
 :root,
-:root[data-theme="dark"] {
-	--bg-0: #0a0c10;
-	--bg-1: #11141b;
-	--bg-2: #1a1e28;
-	--bg-3: #242a36;
-	--bg-4: #2f3645;
-	--fg-0: #f5f7fa;
-	--fg-1: #c7cdd9;
-	--fg-2: #8b94a8;
-	--fg-3: #5a6478;
-	--accent: #0066ff;
-	--accent-2: #4d8fff;
-	--accent-bg: rgba(0, 102, 255, 0.14);
-	--ok: #34d399;
-	--warn: #fbbf24;
-	--err: #f87171;
-	--info: #60a5fa;
-	--border: rgba(255, 255, 255, 0.06);
-	--border-strong: rgba(255, 255, 255, 0.12);
-	--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-	--shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
-	--shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.5);
-	--surface-img: radial-gradient(
-		rgba(255, 255, 255, 0.04) 1px,
-		transparent 1px
-	);
+:root[data-theme="light"] {
+	/* Surfaces */
+	--bg-0: oklch(1 0 0); /* page (pure white) */
+	--bg-1: oklch(0.965 0.004 260); /* card / nav */
+	--bg-2: oklch(0.945 0.005 260); /* hover / raised */
+	--bg-3: oklch(0.92 0.006 260); /* deeper inset */
+	--bg-4: oklch(0.83 0.009 260); /* strong tint */
+
+	/* Text */
+	--fg-0: oklch(0.15 0.008 260); /* display */
+	--fg-1: oklch(0.24 0.01 260); /* primary */
+	--fg-2: oklch(0.48 0.01 260); /* secondary */
+	--fg-3: oklch(0.68 0.008 260); /* disabled */
+
+	/* Brand (Hubera blue #1072F5) */
+	--accent: oklch(0.5 0.22 254);
+	--accent-2: oklch(0.42 0.22 254);
+	--accent-bg: oklch(0.95 0.04 254);
+
+	/* State */
+	--ok: oklch(0.58 0.15 155);
+	--warn: oklch(0.65 0.15 80);
+	--err: oklch(0.58 0.2 25);
+	--info: oklch(0.55 0.18 240);
+
+	--border: oklch(0.9 0.007 260);
+	--border-strong: oklch(0.83 0.009 260);
+
+	--shadow-sm: 0 1px 2px rgba(15, 20, 33, 0.06);
+	--shadow-md: 0 6px 18px -6px rgba(15, 20, 33, 0.08);
+	--shadow-lg: 0 18px 48px -16px rgba(15, 20, 33, 0.14);
+
+	/* SVG dot grid (canvas backdrop). NOT a CSS gradient. */
+	--surface-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='1' cy='1' r='1' fill='rgba(80,80,100,0.22)'/%3E%3C/svg%3E");
+
 	--radius-sm: 4px;
-	--radius: 8px;
-	--radius-lg: 12px;
+	--radius: 6px;
+	--radius-lg: 10px;
+	--radius-xl: 12px;
+
 	--space-1: 4px;
 	--space-2: 8px;
 	--space-3: 12px;
 	--space-4: 16px;
 	--space-5: 24px;
 	--space-6: 32px;
+
 	--ruler-thickness: 22px;
-	--ease: cubic-bezier(0.4, 0, 0.2, 1);
+	--ease: cubic-bezier(0.165, 0.84, 0.44, 1);
+	--ease-chrome: cubic-bezier(0.2, 0.8, 0.2, 1);
 	--dur: 180ms;
+
 	--font:
-		-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui,
-		sans-serif;
-	--font-display:
-		"Bebas Neue", -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+		var(--font-space-grotesk, "Space Grotesk"), -apple-system,
+		BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+	--font-display: var(--font);
 	--font-mono:
-		"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-		monospace;
+		var(--font-space-mono, "Space Mono"), ui-monospace, SFMono-Regular,
+		"SF Mono", Menlo, Consolas, monospace;
 }
 
-:root[data-theme="light"] {
-	--bg-0: #f7f8fb;
-	--bg-1: #ffffff;
-	--bg-2: #f1f3f7;
-	--bg-3: #e3e7ee;
-	--bg-4: #cbd2dd;
-	--fg-0: #0f1421;
-	--fg-1: #2d3548;
-	--fg-2: #5a6478;
-	--fg-3: #8b94a8;
-	--accent: #0052cc;
-	--accent-2: #0066ff;
-	--accent-bg: rgba(0, 82, 204, 0.1);
-	--ok: #059669;
-	--warn: #d97706;
-	--err: #dc2626;
-	--info: #2563eb;
-	--border: rgba(15, 20, 33, 0.08);
-	--border-strong: rgba(15, 20, 33, 0.16);
-	--shadow-sm: 0 1px 2px rgba(15, 20, 33, 0.06);
-	--shadow-md: 0 4px 16px rgba(15, 20, 33, 0.08);
-	--shadow-lg: 0 12px 48px rgba(15, 20, 33, 0.12);
-	--surface-img: radial-gradient(rgba(15, 20, 33, 0.05) 1px, transparent 1px);
+/* DARK */
+:root[data-theme="dark"] {
+	--bg-0: oklch(0.145 0.006 260); /* page */
+	--bg-1: oklch(0.175 0.007 260); /* card */
+	--bg-2: oklch(0.21 0.008 260); /* hover / raised */
+	--bg-3: oklch(0.125 0.006 260); /* deeper inset */
+	--bg-4: oklch(0.38 0.012 260);
+
+	--fg-0: oklch(0.97 0.005 260);
+	--fg-1: oklch(0.82 0.012 260);
+	--fg-2: oklch(0.62 0.01 260);
+	--fg-3: oklch(0.42 0.008 260);
+
+	--accent: oklch(0.6 0.21 254);
+	--accent-2: oklch(0.66 0.2 254);
+	--accent-bg: oklch(0.24 0.06 254);
+
+	--ok: oklch(0.72 0.16 155);
+	--warn: oklch(0.78 0.15 80);
+	--err: oklch(0.64 0.21 25);
+	--info: oklch(0.68 0.18 240);
+
+	--border: oklch(0.24 0.008 260);
+	--border-strong: oklch(0.3 0.01 260);
+
+	--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+	--shadow-md: 0 8px 24px -8px rgba(0, 0, 0, 0.4);
+	--shadow-lg: 0 18px 48px -12px rgba(0, 0, 0, 0.6);
+
+	--surface-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='1' cy='1' r='1' fill='rgba(255,255,255,0.10)'/%3E%3C/svg%3E");
 }
 
-@media (prefers-color-scheme: light) {
+/* Auto-dark when no explicit data-theme is set. */
+@media (prefers-color-scheme: dark) {
 	:root:not([data-theme]) {
-		--bg-0: #f7f8fb;
-		--bg-1: #ffffff;
-		--bg-2: #f1f3f7;
-		--bg-3: #e3e7ee;
-		--bg-4: #cbd2dd;
-		--fg-0: #0f1421;
-		--fg-1: #2d3548;
-		--fg-2: #5a6478;
-		--fg-3: #8b94a8;
-		--accent: #0052cc;
-		--accent-2: #0066ff;
-		--accent-bg: rgba(0, 82, 204, 0.1);
-		--ok: #059669;
-		--warn: #d97706;
-		--err: #dc2626;
-		--info: #2563eb;
-		--border: rgba(15, 20, 33, 0.08);
-		--border-strong: rgba(15, 20, 33, 0.16);
-		--shadow-sm: 0 1px 2px rgba(15, 20, 33, 0.06);
-		--shadow-md: 0 4px 16px rgba(15, 20, 33, 0.08);
-		--shadow-lg: 0 12px 48px rgba(15, 20, 33, 0.12);
-		--surface-img: radial-gradient(rgba(15, 20, 33, 0.05) 1px, transparent 1px);
+		--bg-0: oklch(0.145 0.006 260);
+		--bg-1: oklch(0.175 0.007 260);
+		--bg-2: oklch(0.21 0.008 260);
+		--bg-3: oklch(0.125 0.006 260);
+		--bg-4: oklch(0.38 0.012 260);
+
+		--fg-0: oklch(0.97 0.005 260);
+		--fg-1: oklch(0.82 0.012 260);
+		--fg-2: oklch(0.62 0.01 260);
+		--fg-3: oklch(0.42 0.008 260);
+
+		--accent: oklch(0.6 0.21 254);
+		--accent-2: oklch(0.66 0.2 254);
+		--accent-bg: oklch(0.24 0.06 254);
+
+		--ok: oklch(0.72 0.16 155);
+		--warn: oklch(0.78 0.15 80);
+		--err: oklch(0.64 0.21 25);
+		--info: oklch(0.68 0.18 240);
+
+		--border: oklch(0.24 0.008 260);
+		--border-strong: oklch(0.3 0.01 260);
+
+		--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+		--shadow-md: 0 8px 24px -8px rgba(0, 0, 0, 0.4);
+		--shadow-lg: 0 18px 48px -12px rgba(0, 0, 0, 0.6);
+
+		--surface-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='1' cy='1' r='1' fill='rgba(255,255,255,0.10)'/%3E%3C/svg%3E");
 	}
 }
 
@@ -111,13 +153,16 @@ html,
 body {
 	height: 100%;
 	background: var(--bg-0);
-	color: var(--fg-0);
+	color: var(--fg-1);
 	font-family: var(--font);
 	font-size: 13px;
 	line-height: 1.5;
 	overflow: hidden;
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
+	transition:
+		background 200ms var(--ease),
+		color 200ms var(--ease);
 }
 
 #app {
@@ -126,17 +171,21 @@ body {
 	flex-direction: column;
 }
 
+::selection {
+	background: var(--accent-bg);
+	color: var(--fg-0);
+}
+
 ::-webkit-scrollbar {
-	width: 8px;
-	height: 8px;
+	width: 6px;
+	height: 6px;
 }
 ::-webkit-scrollbar-track {
 	background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-	background: var(--bg-3);
+	background: var(--border-strong);
 	border-radius: 4px;
-	border: 2px solid var(--bg-0);
 }
 ::-webkit-scrollbar-thumb:hover {
 	background: var(--bg-4);
@@ -167,8 +216,11 @@ select {
 }
 
 a {
-	color: var(--accent-2);
+	color: var(--accent);
 	text-decoration: none;
+}
+a:hover {
+	color: var(--accent-2);
 }
 
 /* ── ATOMS / UTILITIES ── */
@@ -200,7 +252,10 @@ a {
 	margin-top: var(--space-2);
 }
 .muted-center {
-	font-size: 11px;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
 	color: var(--fg-3);
 	text-align: center;
 	padding: var(--space-2);
@@ -218,48 +273,56 @@ a {
 	height: 28px;
 	display: inline-block;
 	vertical-align: middle;
+	color: var(--accent);
 }
 .brand-wordmark {
-	font-family: var(--font-display);
-	font-weight: 400;
-	font-size: 26px;
-	letter-spacing: 0.07em;
+	font-family: var(--font);
+	font-weight: 600;
+	font-size: 16px;
+	letter-spacing: -0.01em;
 	line-height: 1;
 	margin-left: 10px;
-	margin-top: 3px;
 	color: var(--fg-0);
 }
 .btn-danger {
 	color: var(--err);
 }
 .btn-danger:hover {
-	background: rgba(248, 113, 113, 0.1);
+	background: oklch(0.58 0.2 25 / 0.1);
 }
 .btn-danger-solid {
 	background: var(--err);
 	color: #fff;
 }
 .btn-danger-solid:hover:not(:disabled) {
-	filter: brightness(1.1);
+	filter: brightness(1.05);
 }
 
-/* ── RECORDER BAR ── */
+/* ── RECORDER BAR ── thin row sitting directly on the canvas (transparent),
+ * its inner pills do all the work. Recording / paused states briefly
+ * tint the row so the canvas reads as "armed".
+ */
 .recorder-bar {
 	display: flex;
 	align-items: center;
 	gap: var(--space-2);
-	padding: var(--space-3);
-	background: var(--bg-2);
-	border-bottom: 1px solid var(--border);
+	padding: 10px 14px;
+	background: transparent;
+	border: 0;
 }
 .recorder-bar.recording {
-	background: rgba(248, 113, 113, 0.08);
+	background: oklch(0.58 0.2 25 / 0.06);
+	border-radius: 8px;
 }
 .recorder-bar.paused {
 	background: var(--accent-bg);
+	border-radius: 8px;
 }
 .rec-status {
-	font-size: 11px;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
 	color: var(--fg-2);
 	display: inline-flex;
 	align-items: center;
@@ -271,9 +334,11 @@ a {
 	gap: 4px;
 	padding: 2px 8px;
 	border-radius: 99px;
+	font-family: var(--font-mono);
 	font-size: 10px;
-	font-weight: 600;
-	letter-spacing: 0.05em;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
 }
 .rec-pill.rec-on {
 	background: var(--err);
@@ -289,6 +354,8 @@ a {
 	box-shadow: var(--shadow-lg);
 	position: relative;
 	flex-shrink: 0;
+	border-radius: var(--radius-lg);
+	overflow: hidden;
 }
 .viewport iframe {
 	width: 100%;
@@ -315,14 +382,17 @@ a {
 	flex: 1;
 }
 .preview-footer {
-	padding: var(--space-2) var(--space-3);
-	border-top: 1px solid var(--border);
-	background: var(--bg-1);
+	padding: 8px 14px;
+	border: 0;
+	background: transparent;
 }
+/* The log panel still lives inside the inspector floating card so it keeps
+ * its surface treatment via the inspector card; this rule only adds the
+ * top hairline divider that separates it from the panel above. */
 .log-panel {
 	padding: var(--space-2) var(--space-3);
 	border-top: 1px solid var(--border);
-	background: var(--bg-1);
+	background: var(--bg-0);
 	flex-shrink: 0;
 }
 .log-panel .section-title {

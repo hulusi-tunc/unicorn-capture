@@ -19,7 +19,7 @@ const orch = await createSnapOrchestrator({
 	outDir: OUT_DIR,
 });
 
-console.log("Unicorn Capture — RN snap mode");
+console.log("Prisma — RN snap mode");
 console.log(`  port:    ws://localhost:${PORT}`);
 console.log(`  out:     ${OUT_DIR}`);
 console.log(`  session: ${orch.sessionId}`);
@@ -143,6 +143,8 @@ async function finishSession(
 		token: UPLOAD_TOKEN,
 		outDir: orch.outDir,
 		session,
+		flows: orch.listFlows(),
+		allSnaps: orch.listAllSnaps(),
 		log: (m) => console.log(`  ${m}`),
 	});
 	if (result.ok) {

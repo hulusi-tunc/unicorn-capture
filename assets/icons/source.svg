@@ -13,7 +13,6 @@
     </filter>
   </defs>
   <rect width="1024" height="1024" rx="220" fill="#FFFFFF"/>
-  <!-- prism: ~30% larger now, less padding -->
   <g transform="translate(170 218) scale(1.31)" filter="url(#shadow)">
     <path fill-rule="evenodd" clip-rule="evenodd"
       d="M255.254 0L0 429H512L255.254 0ZM255.254 279.523V86.6969L83.5918 379.672L255.254 279.523Z"
