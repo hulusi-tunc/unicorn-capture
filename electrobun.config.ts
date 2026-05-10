@@ -27,6 +27,16 @@ export default {
 			"assets/icons/iphone-17-dark.png": "views/mainview/iphone-17-dark.png",
 			"samples/devices.yaml": "samples/devices.yaml",
 		},
+		// Auto-update: when set, the running app polls
+		// `${baseUrl}/<env>-macos-<arch>-update.json` for fresh update.json
+		// files matching the artifacts/ filename pattern that
+		// build:canary / build:stable already produce. Override per-machine
+		// via env var so a fresh clone on a CI worker doesn't accidentally
+		// inherit the publish URL.
+		release: {
+			baseUrl: process.env.ELECTROBUN_RELEASE_BASE_URL ?? "",
+			generatePatch: true,
+		},
 		mac: {
 			bundleCEF: false,
 			icons: "assets/UnicornStudio.iconset",

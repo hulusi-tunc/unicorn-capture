@@ -85,8 +85,10 @@ gallery/apps/platform/          # sibling repo: Next.js review platform
 
 | Command | Output | Notes |
 |---|---|---|
-| `bun run build:canary` | `artifacts/canary-macos-arm64-Prisma-canary.dmg` | Unsigned. Open via right-click → Open. |
+| `bun run build:canary` | `artifacts/canary-macos-arm64-Unicorn Studio-canary.dmg` | Unsigned. Open via right-click → Open. |
 | `bun run build:signed` | Same path, but signed + notarized | Reads `.env.build`. See `.env.build.example`. |
+| `bun run release:publish` | Uploads `artifacts/` to your CDN | rsync or S3 — picks based on `.env.build`. |
+| `bun run release` | Build + sign + notarize + publish | The one-shot. Run from a clean tree. |
 
 For signed builds you need a `.env.build` file with:
 
@@ -96,6 +98,16 @@ ELECTROBUN_APPLEID="..."
 ELECTROBUN_APPLEIDPASS="abcd-efgh-ijkl-mnop"   # app-specific, NOT account password
 ELECTROBUN_TEAMID="XXXXXXXXXX"
 ```
+
+For auto-update, add the publish target + the public-facing URL:
+
+```
+ELECTROBUN_RELEASE_BASE_URL="https://capture-releases.unicornstudio.com"
+PUBLISH_RSYNC_DEST="user@host:/var/www/capture-releases"   # OR
+PUBLISH_S3_BUCKET="unicorn-capture-releases"
+```
+
+The running app polls `${ELECTROBUN_RELEASE_BASE_URL}/<env>-macos-<arch>-update.json` for fresh `update.json` files. If the hash differs from what's installed, it pulls the matching `.app.tar.zst`, applies the patch, and prompts the user to restart on next launch.
 
 ## Companion repos
 
