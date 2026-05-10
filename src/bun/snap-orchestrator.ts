@@ -63,6 +63,17 @@ export interface Flow {
 	screens?: FlowScreenSpec[];
 }
 
+/**
+ * One past capture of the same screen slot. Stored newest-first when
+ * re-snap replaces the slot's current image with a new one. `versions[0]`
+ * is the version that was current right before the latest snap.
+ */
+export interface SnapVersion {
+	image: string;
+	capturedAt: string;
+	navStack?: string[];
+}
+
 export interface SnapRecord {
 	projectId: string;
 	sessionId: string;
@@ -84,6 +95,12 @@ export interface SnapRecord {
 	 * auto-assign on capture and the user can re-assign by drag.
 	 */
 	flowId: string;
+	/**
+	 * Past captures of this slot (same projectId + route + stateHash).
+	 * Newest first. Empty/undefined when the slot has only ever been
+	 * snapped once. Re-snap pushes the previous current state here.
+	 */
+	versions?: SnapVersion[];
 }
 
 export interface SessionRecord {
@@ -610,24 +627,67 @@ export async function createSnapOrchestrator(
 			};
 		}
 
-		const flow = ensureAutoFlow(state.snapshot.route, state.projectId);
-		const record: SnapRecord = {
-			projectId: state.projectId,
-			sessionId,
-			sequence,
-			platform: "ios",
-			route: state.snapshot.route,
-			navStack: state.snapshot.navStack,
-			stateHash,
-			image: imageRel,
-			capturedAt: new Date().toISOString(),
-			flowId: flow.id,
-		};
+		// Re-snap detection: find an existing record at the same screen
+		// slot (projectId + route + stateHash). If we find one, REPLACE
+		// its current image instead of pushing a new record — preserves
+		// (sessionId, sequence) identity so the web-side frame_id stays
+		// stable, and keeps the user's drag-and-drop placement intact.
+		// Past captures stack into `versions[]` newest-first.
+		const slotKey = `${state.projectId} ${state.snapshot.route} ${stateHash}`;
+		let existing: SnapRecord | null = null;
+		for (const s of manifest.sessions) {
+			for (const r of s.snaps) {
+				if (r.projectId !== state.projectId) continue;
+				if (r.route !== state.snapshot.route) continue;
+				if (r.stateHash !== stateHash) continue;
+				existing = r;
+				break;
+			}
+			if (existing) break;
+		}
 
-		session.snaps.push(record);
-		if (!sessionAttached) {
-			manifest.sessions.push(session);
-			sessionAttached = true;
+		const capturedAt = new Date().toISOString();
+		let record: SnapRecord;
+		if (existing) {
+			// Push previous current to versions[] (newest first), update top.
+			const versions = existing.versions ?? [];
+			versions.unshift({
+				image: existing.image,
+				capturedAt: existing.capturedAt,
+				navStack: existing.navStack,
+			});
+			existing.versions = versions;
+			existing.image = imageRel;
+			existing.capturedAt = capturedAt;
+			existing.navStack = state.snapshot.navStack;
+			// Drop any stale uploaded marker — the new image needs to push.
+			delete existing.uploaded;
+			record = existing;
+			// We don't bump sequence/sessionId — identity is stable across
+			// re-snaps so the user sees the same card "refresh" rather than
+			// a duplicate. `sequence` was pre-incremented above; roll it back
+			// because we didn't actually create a new record.
+			sequence -= 1;
+			void slotKey;
+		} else {
+			const flow = ensureAutoFlow(state.snapshot.route, state.projectId);
+			record = {
+				projectId: state.projectId,
+				sessionId,
+				sequence,
+				platform: "ios",
+				route: state.snapshot.route,
+				navStack: state.snapshot.navStack,
+				stateHash,
+				image: imageRel,
+				capturedAt,
+				flowId: flow.id,
+			};
+			session.snaps.push(record);
+			if (!sessionAttached) {
+				manifest.sessions.push(session);
+				sessionAttached = true;
+			}
 		}
 		// Don't await — the manifest write is purely for crash-recovery; the
 		// in-memory session is the source of truth for the running app.
@@ -812,6 +872,18 @@ export async function createSnapOrchestrator(
 			}
 		}
 
+		// Track every declaredId in the incoming declaration so we can prune
+		// flows that were removed in this re-declaration (e.g. heuristic
+		// "Trade" / "Splash" / "Role" flows after the user collapses them
+		// into a "worker-onboarding" sub-flow). Without this, stale flows
+		// linger forever and clutter the sidebar.
+		const declaredIdsInNewDecl = new Set<string>();
+		const collectIds = (node: DeclaredFlowInput) => {
+			declaredIdsInNewDecl.add(node.id);
+			for (const child of node.flows ?? []) collectIds(child);
+		};
+		for (const root of decl.flows) collectIds(root);
+
 		const visit = (
 			node: DeclaredFlowInput,
 			parentInternalId: string | undefined,
@@ -876,6 +948,40 @@ export async function createSnapOrchestrator(
 		};
 
 		for (const root of decl.flows) visit(root, undefined);
+
+		// Prune flows that came from a previous declaration but are absent
+		// from the new one. Re-route any snaps inside them back to their
+		// route's auto-flow (mirrors deleteFlow's re-parent logic) so we
+		// never lose user data — only the empty container disappears.
+		const stale = manifest.flows.filter(
+			(f) =>
+				f.projectId === projectId &&
+				f.declaredId &&
+				!declaredIdsInNewDecl.has(f.declaredId),
+		);
+		if (stale.length > 0) {
+			const staleIds = new Set(stale.map((f) => f.id));
+			for (const session of manifest.sessions) {
+				for (const snap of session.snaps) {
+					if (staleIds.has(snap.flowId)) {
+						snap.flowId = ensureAutoFlow(snap.route, snap.projectId).id;
+					}
+				}
+			}
+			// Re-parent any non-stale children whose parent is being removed —
+			// they bubble up to the deleted flow's parent (or top level).
+			for (const f of manifest.flows) {
+				if (f.parentFlowId && staleIds.has(f.parentFlowId)) {
+					const deletedParent = stale.find(
+						(s) => s.id === f.parentFlowId,
+					)?.parentFlowId;
+					if (deletedParent) f.parentFlowId = deletedParent;
+					else delete f.parentFlowId;
+				}
+			}
+			manifest.flows = manifest.flows.filter((f) => !staleIds.has(f.id));
+			dirty = true;
+		}
 
 		if (dirty) await saveManifest(manifestPath, manifest);
 	}

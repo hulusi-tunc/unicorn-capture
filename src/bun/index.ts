@@ -349,6 +349,11 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 			: undefined,
 		position: s.position,
 		flowId: s.flowId,
+		versions: s.versions?.map((v) => ({
+			imagePath: join(outDir, v.image),
+			capturedAt: v.capturedAt,
+			navStack: v.navStack,
+		})),
 	};
 }
 // Boot the orchestrator eagerly so the view's first status poll has a sessionId.

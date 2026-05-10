@@ -358,21 +358,80 @@ export function patchMetroConfig(opts: {
 }
 
 // ── _layout.tsx auto-injection (regex heuristic, conservative) ─────────────
+
+/**
+ * Compute the import specifier (e.g. `../snap-flows`) for snap-flows.ts
+ * relative to a given layout file. Returns null if snap-flows.ts can't be
+ * located — caller falls back to a flowless installSnapBridge() call.
+ *
+ * Convention: snap-flows.ts is sibling to `app/`. So from `app/_layout.tsx`
+ * it's `../snap-flows`; from `mobile/app/_layout.tsx` (where `mobile/` is
+ * an RN app inside a larger repo) it's still `../snap-flows`.
+ */
+function computeFlowsImportPath(layoutPath: string): string | null {
+	const layoutDir = dirname(layoutPath);
+	// Walk up looking for snap-flows.ts (covers nested grouped routes like
+	// `app/(tabs)/_layout.tsx` → `../../snap-flows`).
+	let dir = layoutDir;
+	for (let i = 0; i < 6; i++) {
+		const candidate = join(dir, "snap-flows.ts");
+		if (existsSync(candidate)) {
+			let rel = relative(layoutDir, candidate).replace(/\.tsx?$/, "");
+			rel = rel.replace(/\\/g, "/");
+			if (!rel.startsWith(".")) rel = `./${rel}`;
+			return rel;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return null;
+}
+
 export function layoutSnippet(slug: string): string {
 	return `// ── @unicorn-studio/snap-bridge wiring ──────────────────────────────────
-import { useEffect } from "react";
-import { usePathname, useSegments } from "expo-router";
-import { installSnapBridge, setSnapState } from "@unicorn-studio/snap-bridge";
+import { installSnapBridge } from "@unicorn-studio/snap-bridge";
+import { useSnapAutoSync } from "@unicorn-studio/snap-bridge/expo-router";
+import { snapFlows } from "../snap-flows";
 
-installSnapBridge({ projectId: ${JSON.stringify(slug)} });
+installSnapBridge({ projectId: ${JSON.stringify(slug)}, flows: snapFlows });
 
-// Inside your root component, after any \`useFonts\` calls:
-const pathname = usePathname();
-const segments = useSegments();
-useEffect(() => {
-  setSnapState({ route: pathname, navStack: segments });
-}, [pathname, segments]);
+// Inside your root component:
+useSnapAutoSync();
 `;
+}
+
+/**
+ * Inspect a layout that already references snap-bridge and return a list of
+ * problems that would prevent the bridge from working with the given Capture
+ * project slug. Empty list = the wiring is fine, nothing to do.
+ */
+function inspectExistingWiring(src: string, expectedSlug: string): string[] {
+	const issues: string[] = [];
+	const installMatch = /installSnapBridge\s*\(\s*\{([^}]*)\}\s*\)/.exec(src);
+	if (!installMatch) {
+		issues.push(
+			"snap-bridge is imported but `installSnapBridge({...})` is not called",
+		);
+		return issues;
+	}
+	const argsBlock = installMatch[1] ?? "";
+	const projectIdMatch = /projectId\s*:\s*['"`]([^'"`]+)['"`]/.exec(argsBlock);
+	if (!projectIdMatch) {
+		issues.push(
+			"`installSnapBridge` is called without a `projectId` — bridge has no project to attach to",
+		);
+	} else if (projectIdMatch[1] !== expectedSlug) {
+		issues.push(
+			`projectId is "${projectIdMatch[1]}" but the Capture project slug is "${expectedSlug}" — change one of them so they match`,
+		);
+	}
+	if (!/flows\s*:\s*\w+/.test(argsBlock)) {
+		issues.push(
+			"`flows:` parameter missing — bridge will connect but Capture won't know your screens. Add `import { snapFlows } from '../snap-flows'` and pass `flows: snapFlows`",
+		);
+	}
+	return issues;
 }
 
 export function injectLayoutSnippet(
@@ -400,7 +459,19 @@ export function injectLayoutSnippet(
 	}
 	let src = readFileSync(layoutPath, "utf8");
 	if (src.includes("@unicorn-studio/snap-bridge")) {
-		return { mode: "already" };
+		// Inspect existing wiring — silent "already" hides bugs (wrong projectId,
+		// missing `flows: snapFlows`, etc.) that prevent the bridge from
+		// connecting. Surface them as a manual-mode warning so the user knows
+		// what to fix instead of staring at a "Waiting…" pill forever.
+		const issues = inspectExistingWiring(src, slug);
+		if (issues.length === 0) {
+			return { mode: "already" };
+		}
+		return {
+			mode: "manual",
+			snippet: layoutSnippet(slug),
+			reason: `Found existing snap-bridge wiring with issues:\n  • ${issues.join("\n  • ")}\nUpdate manually using the snippet above (or re-write _layout.tsx from scratch).`,
+		};
 	}
 
 	// Find a good place to inject imports: after the last top-level import line.
@@ -411,11 +482,22 @@ export function injectLayoutSnippet(
 		lastImportEnd = match.index + match[0].length;
 	}
 
+	// Compute the relative path from the layout file to snap-flows.ts so the
+	// import resolves regardless of layout depth (`app/_layout.tsx` →
+	// `../snap-flows`, monorepo `apps/mobile/app/_layout.tsx` → same).
+	const flowsImportPath = computeFlowsImportPath(layoutPath);
+	const flowsImportLine = flowsImportPath
+		? `import { snapFlows } from ${JSON.stringify(flowsImportPath)};\n`
+		: "";
+	const installCall = flowsImportPath
+		? `\ninstallSnapBridge({ projectId: ${JSON.stringify(slug)}, flows: snapFlows });\n`
+		: `\ninstallSnapBridge({ projectId: ${JSON.stringify(slug)} });\n`;
+
 	const importBlock =
-		`\nimport { useEffect } from "react";\n` +
-		`import { usePathname, useSegments } from "expo-router";\n` +
-		`import { installSnapBridge, setSnapState } from "@unicorn-studio/snap-bridge";\n` +
-		`\ninstallSnapBridge({ projectId: ${JSON.stringify(slug)} });\n`;
+		`\nimport { installSnapBridge } from "@unicorn-studio/snap-bridge";\n` +
+		`import { useSnapAutoSync } from "@unicorn-studio/snap-bridge/expo-router";\n` +
+		flowsImportLine +
+		installCall;
 
 	if (lastImportEnd === -1) {
 		return {
@@ -442,11 +524,7 @@ export function injectLayoutSnippet(
 
 	const hookBlock =
 		`\n  // ── @unicorn-studio/snap-bridge route tracking ──\n` +
-		`  const __snapPathname = usePathname();\n` +
-		`  const __snapSegments = useSegments();\n` +
-		`  useEffect(() => {\n` +
-		`    setSnapState({ route: __snapPathname, navStack: __snapSegments });\n` +
-		`  }, [__snapPathname, __snapSegments]);\n`;
+		`  useSnapAutoSync();\n`;
 
 	// Backup before edit.
 	const backupPath = `${layoutPath}.snap-bridge.bak`;

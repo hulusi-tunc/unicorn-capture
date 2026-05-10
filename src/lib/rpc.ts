@@ -37,6 +37,12 @@ export interface RunResult {
  * Subset of SnapRecord that the view needs. Keep flat — RPC traverses JSON.
  * `imagePath` is an absolute path; the view loads it via file:// URL.
  */
+export interface RnSnapVersion {
+	imagePath: string;
+	capturedAt: string;
+	navStack?: string[];
+}
+
 export interface RnSnapInfo {
 	sessionId: string;
 	sequence: number;
@@ -51,6 +57,12 @@ export interface RnSnapInfo {
 	position?: number;
 	/** Which flow this snap belongs to. Always set. */
 	flowId: string;
+	/**
+	 * Past captures of this slot — populated by re-snapping the same
+	 * (route, stateHash) more than once. Newest first. Length 0 means
+	 * the slot has only ever been captured once.
+	 */
+	versions?: RnSnapVersion[];
 }
 
 export interface RnFlowScreen {

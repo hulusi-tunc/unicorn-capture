@@ -63,6 +63,7 @@
 	transition: transform 160ms var(--ease), box-shadow 160ms var(--ease),
 		border-color 160ms var(--ease);
 	min-height: 110px;
+	position: relative;
 }
 .dash-card:hover {
 	transform: translateY(-2px);
@@ -123,6 +124,54 @@
 	font-family: var(--font-mono);
 	font-size: 10px;
 	color: var(--fg-3);
+}
+/* Hover-only refresh + remove icon row, top-right of the card */
+.dash-card-actions {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+	display: inline-flex;
+	gap: 4px;
+	opacity: 0;
+	transition: opacity 140ms var(--ease);
+	pointer-events: none;
+}
+.dash-card:hover .dash-card-actions,
+.dash-card:focus-within .dash-card-actions {
+	opacity: 1;
+	pointer-events: auto;
+}
+.dash-card-action {
+	all: unset;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 8px;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	color: var(--fg-2);
+	transition: background 120ms var(--ease), color 120ms var(--ease),
+		border-color 120ms var(--ease);
+}
+.dash-card-action:hover {
+	background: var(--bg-0);
+	color: var(--fg-0);
+	border-color: var(--border-strong);
+}
+.dash-card-action.is-busy {
+	pointer-events: none;
+	opacity: 0.6;
+}
+.dash-card-action-danger:hover {
+	color: oklch(0.55 0.20 25);
+	border-color: oklch(0.55 0.20 25);
+	background: oklch(0.97 0.04 25);
+}
+[data-theme="dark"] .dash-card-action-danger:hover {
+	background: oklch(0.22 0.06 25);
 }
 .dash-empty {
 	margin: 40px auto;
@@ -294,6 +343,65 @@
 	justify-self: end;
 }
 
+/* Project-mode context block — name + bridge status pill.
+   Sits in the slot the search occupies on dashboard. */
+.gtb-context {
+	-webkit-app-region: no-drag;
+	display: none;
+	align-items: center;
+	gap: 10px;
+	justify-self: center;
+	min-width: 0;
+}
+body[data-mode="mobile"] .gtb-context,
+body[data-mode="web"] .gtb-context {
+	display: inline-flex;
+}
+.gtb-context-name {
+	font-family: var(--font);
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-0);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 240px;
+}
+.gtb-context-pill {
+	-webkit-app-region: no-drag;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 24px;
+	padding: 0 10px;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	font-family: var(--font);
+	font-size: 11px;
+	color: var(--fg-2);
+	cursor: help;
+	transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.gtb-context-pill:hover {
+	border-color: var(--fg-3);
+	color: var(--fg-1);
+}
+.gtb-context-pill.is-connected {
+	color: var(--fg-1);
+}
+.gtb-context-pill .dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 999px;
+	flex-shrink: 0;
+}
+.gtb-context-pill .dot.success { background: var(--success, #34c759); }
+.gtb-context-pill .dot.warn { background: var(--warn, #f5a524); }
+.gtb-context-pill-label {
+	white-space: nowrap;
+}
+
 /* Mode-aware action buttons inside the topbar.
    data-mode is one of: dashboard | mobile | web. */
 body:not([data-mode="dashboard"]) .mode-dashboard { display: none; }
@@ -301,7 +409,7 @@ body:not([data-mode="mobile"]):not([data-mode="web"]) .mode-project { display: n
 body:not([data-mode="mobile"]) .mode-mobile { display: none; }
 body:not([data-mode="web"]) .mode-web { display: none; }
 /* Hide search on project pages */
-body:not([data-mode="dashboard"]) .gtb-search { visibility: hidden; }
+body:not([data-mode="dashboard"]) .gtb-search { display: none; }
 
 /* "or" divider between URL input and the dropzone in the merged Web mode. */
 .src-divider {
@@ -1575,10 +1683,77 @@ kbd {
 	border-radius: 8px;
 }
 
+/* ── WEB TABS (Live / Library) ── */
+.web-tabs {
+	flex-shrink: 0;
+	align-self: flex-start;
+	margin-bottom: 0;
+}
+.web-pane {
+	display: none;
+	flex: 1;
+	min-height: 0;
+	flex-direction: column;
+	gap: 10px;
+}
+.web-pane.is-active {
+	display: flex;
+}
+
+/* ── LIBRARY PANE ── snap gallery grouped by flow (placeholder shell) */
+.web-library-grid {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-sm);
+	padding: 24px;
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+.web-library-empty {
+	margin: auto;
+	max-width: 360px;
+	text-align: center;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	padding: 32px 20px;
+	border: 1px dashed var(--border);
+	border-radius: 12px;
+	background: var(--bg-1);
+}
+.web-library-empty-icon {
+	color: var(--fg-3);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 56px;
+	height: 56px;
+	border-radius: 999px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+}
+.web-library-empty-title {
+	font-family: var(--font);
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--fg-0);
+}
+.web-library-empty-hint {
+	font-size: 12px;
+	color: var(--fg-2);
+	line-height: 1.5;
+}
+
 .rn-layout {
 	flex: 1;
 	display: grid;
-	grid-template-columns: 260px 1fr 280px;
+	grid-template-columns: 260px 1fr;
 	min-height: 0;
 	padding: 12px;
 	gap: 10px;
@@ -1588,16 +1763,9 @@ kbd {
 	transition: grid-template-columns 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .rn-layout-collapsed {
-	grid-template-columns: 0 1fr 280px;
+	grid-template-columns: 0 1fr;
 }
-.rn-layout-rcollapsed {
-	grid-template-columns: 260px 1fr 0;
-}
-.rn-layout-collapsed.rn-layout-rcollapsed {
-	grid-template-columns: 0 1fr 0;
-}
-.rn-layout-collapsed .rn-sidebar,
-.rn-layout-rcollapsed .rn-rightpanel {
+.rn-layout-collapsed .rn-sidebar {
 	border: 0;
 	box-shadow: none;
 	opacity: 0;
@@ -1605,12 +1773,10 @@ kbd {
 	min-width: 0;
 	width: 0;
 }
-.rn-layout-collapsed .rn-sidebar-expand,
-.rn-layout-rcollapsed .rn-rightpanel-expand {
+.rn-layout-collapsed .rn-sidebar-expand {
 	display: inline-flex;
 }
-.rn-sidebar-expand,
-.rn-rightpanel-expand { display: none; }
+.rn-sidebar-expand { display: none; }
 
 /* Right panel — same card shell as sidebar, mirrored chrome */
 .rn-rightpanel {
@@ -3032,6 +3198,167 @@ kbd {
 	transform: scale(1.08);
 }
 
+/* "Updated" pill — floats inside the bezel top-right when this slot has
+   captures the user hasn't viewed yet. Click on the card clears it and
+   opens the lightbox where they can scrub the versions. Disappears with
+   a quick fade-out animation rather than a hard pop. */
+.rn-bezel { position: relative; }
+.rn-card-updated {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	z-index: 3;
+	display: inline-flex;
+	align-items: center;
+	height: 20px;
+	padding: 0 8px;
+	border-radius: 999px;
+	background: var(--accent);
+	color: #fff;
+	font-family: var(--font);
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	box-shadow: 0 4px 10px -3px oklch(0 0 0 / 0.35);
+	pointer-events: none;
+	transition:
+		opacity 180ms var(--ease),
+		transform 180ms var(--ease);
+}
+.rn-card-updated.is-leaving {
+	opacity: 0;
+	transform: translateY(-4px) scale(0.94);
+}
+
+/* Lightbox version scrubber strip — chip row with thumbnails of each
+   past capture. The right-most chip is the latest (current); left-most
+   is the oldest. Active chip highlighted. */
+.rn-lightbox-versions {
+	display: flex;
+	gap: 8px;
+	padding: 12px 24px;
+	overflow-x: auto;
+	border-top: 1px solid oklch(1 0 0 / 0.08);
+	background: oklch(0 0 0 / 0.3);
+}
+.rn-lightbox-version-chip {
+	all: unset;
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	padding: 6px;
+	border-radius: 8px;
+	cursor: pointer;
+	border: 2px solid transparent;
+	background: oklch(1 0 0 / 0.04);
+	transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.rn-lightbox-version-chip:hover {
+	background: oklch(1 0 0 / 0.10);
+}
+.rn-lightbox-version-chip[data-active="true"] {
+	border-color: var(--accent);
+	background: oklch(1 0 0 / 0.12);
+}
+.rn-lightbox-version-thumb {
+	width: 56px;
+	height: 88px;
+	object-fit: cover;
+	border-radius: 4px;
+	background: oklch(0 0 0 / 0.4);
+}
+.rn-lightbox-version-label {
+	font-family: var(--font-mono, "Space Mono", monospace);
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	color: oklch(1 0 0 / 0.92);
+}
+.rn-lightbox-version-time {
+	font-size: 9px;
+	color: oklch(1 0 0 / 0.55);
+	white-space: nowrap;
+}
+
+
+/* "What changed since last visit" banner — slides in from the top of
+   the project view on entry. Auto-dismisses after 12s; × closes early. */
+.rn-changes-banner {
+	position: fixed;
+	top: 56px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 200;
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	min-width: 380px;
+	max-width: 640px;
+	padding: 12px 16px;
+	border-radius: 12px;
+	border: 1px solid var(--accent);
+	background: var(--bg-0);
+	box-shadow: 0 18px 36px -12px oklch(0 0 0 / 0.35);
+	font-family: var(--font);
+	animation: rn-changes-in 240ms var(--ease) both;
+}
+@keyframes rn-changes-in {
+	from {
+		opacity: 0;
+		transform: translate(-50%, -8px);
+	}
+	to {
+		opacity: 1;
+		transform: translate(-50%, 0);
+	}
+}
+.rn-changes-banner.is-leaving {
+	opacity: 0;
+	transform: translate(-50%, -8px);
+	transition: opacity 240ms var(--ease), transform 240ms var(--ease);
+}
+.rn-changes-icon {
+	font-size: 18px;
+	line-height: 1.4;
+}
+.rn-changes-body {
+	flex: 1;
+	min-width: 0;
+}
+.rn-changes-heading {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-0);
+	margin-bottom: 4px;
+}
+.rn-changes-detail {
+	font-size: 12px;
+	color: var(--fg-1);
+	line-height: 1.5;
+}
+.rn-changes-detail b {
+	color: var(--fg-0);
+	font-weight: 600;
+}
+.rn-changes-close {
+	all: unset;
+	cursor: pointer;
+	width: 22px;
+	height: 22px;
+	border-radius: 999px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--fg-3);
+	font-size: 18px;
+	line-height: 1;
+	transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.rn-changes-close:hover {
+	background: var(--bg-1);
+	color: var(--fg-0);
+}
 
 /* Toast stack — bottom-right corner, surfaces log events while the user
    works (refresh results, push outcomes, errors, etc.). */
@@ -3642,6 +3969,125 @@ kbd {
 	color: var(--fg-1);
 }
 .wiz2-verify-checks li { padding: 4px 0; line-height: 1.5; }
+
+/* "Improve flow grouping" upsell block on the success card */
+.wiz2-improve {
+	margin-top: 16px;
+	padding: 14px 16px;
+	border-radius: 10px;
+	border: 1px dashed oklch(0.78 0.10 280);
+	background: var(--bg-0);
+}
+[data-theme="dark"] .wiz2-improve {
+	background: oklch(0.18 0.02 260);
+	border-color: oklch(0.45 0.08 280);
+}
+.wiz2-improve-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-0);
+	margin-bottom: 4px;
+}
+.wiz2-improve-body {
+	margin: 0 0 10px;
+	font-size: 12px;
+	color: var(--fg-1);
+	line-height: 1.5;
+}
+.wiz2-improve-body code,
+.wiz2-improve-hint code {
+	background: var(--bg-1);
+	padding: 1px 5px;
+	border-radius: 4px;
+	font-family: var(--font-mono, monospace);
+	font-size: 11px;
+}
+.wiz2-improve-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-bottom: 8px;
+}
+.wiz2-improve-status {
+	font-size: 11px;
+	color: var(--fg-2);
+}
+.wiz2-improve-hint {
+	margin: 0;
+	font-size: 11px;
+	color: var(--fg-2);
+	line-height: 1.5;
+}
+
+/* Prompt fallback viewer — used when WKWebView blocks clipboard */
+.wiz2-prompt-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 1100;
+	background: oklch(0.10 0.005 260 / 0.6);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	backdrop-filter: blur(2px);
+}
+.wiz2-prompt-dialog {
+	width: 720px;
+	max-width: calc(100vw - 48px);
+	max-height: calc(100vh - 96px);
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4);
+	display: flex;
+	flex-direction: column;
+	font-family: var(--font);
+	overflow: hidden;
+}
+.wiz2-prompt-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--border);
+}
+.wiz2-prompt-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-0);
+}
+.wiz2-prompt-close {
+	background: transparent;
+	border: 0;
+	font-size: 22px;
+	line-height: 1;
+	color: var(--fg-2);
+	cursor: pointer;
+	padding: 0 4px;
+}
+.wiz2-prompt-close:hover { color: var(--fg-0); }
+.wiz2-prompt-hint {
+	margin: 0;
+	padding: 10px 16px;
+	font-size: 12px;
+	color: var(--fg-2);
+	border-bottom: 1px solid var(--border);
+}
+.wiz2-prompt-text {
+	flex: 1;
+	min-height: 320px;
+	width: 100%;
+	border: 0;
+	padding: 12px 16px;
+	font-family: var(--font-mono, "Space Mono", monospace);
+	font-size: 11px;
+	color: var(--fg-1);
+	background: var(--bg-1);
+	resize: none;
+	outline: none;
+	white-space: pre;
+	overflow: auto;
+}
 
 /* Footer */
 .wiz2-footer {

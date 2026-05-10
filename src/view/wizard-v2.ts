@@ -30,6 +30,7 @@ export interface WizardDeps {
 			: Req;
 		detectRepo: Req;
 		runInstaller: Req;
+		improveSnapFlows: Req;
 	};
 	/**
 	 * Subscribe to `onInitProgress` messages. Returns an unsubscribe fn.
@@ -121,9 +122,8 @@ export function openWizardV2(deps: WizardDeps): void {
 	for (const phase of ["detect", "plan", "install", "verify"] as const) {
 		body.appendChild(sections[phase]);
 	}
-	syncPhase();
 
-	// Footer buttons
+	// Footer buttons (created before syncPhase since it reads their .hidden/.disabled)
 	const footer = document.createElement("div");
 	footer.className = "wiz2-footer";
 	const cancelBtn = makeBtn("Cancel", "btn btn-ghost");
@@ -131,6 +131,8 @@ export function openWizardV2(deps: WizardDeps): void {
 	const nextBtn = makeBtn("Continue", "btn btn-primary");
 	footer.append(cancelBtn, backBtn, nextBtn);
 	dialog.appendChild(footer);
+
+	syncPhase();
 
 	cancelBtn.addEventListener("click", () => close());
 	backBtn.addEventListener("click", () => goBack());
@@ -333,8 +335,10 @@ export function openWizardV2(deps: WizardDeps): void {
 		const urlInput = sec.querySelector<HTMLInputElement>(".wiz2-platform-url")!;
 		const tokenInput = sec.querySelector<HTMLInputElement>(".wiz2-token")!;
 
-		// Defaults
-		const defaultSlug = slugify(fp.picked?.packageJsonName ?? "new-project");
+		// Defaults — prefer the repo folder name ("ovria") over the RN
+		// package.json `name` field, which is often the generic "mobile" or
+		// "app" in monorepos and produces colliding slugs.
+		const defaultSlug = pickDefaultSlug(fp);
 		slugInput.value = defaultSlug;
 		nameInput.value = titlecase(defaultSlug);
 		urlInput.value = deps.readLocal("capture.platformUrl") || "http://localhost:3010";
@@ -573,7 +577,7 @@ export function openWizardV2(deps: WizardDeps): void {
 			? [
 					v.bridgeConnected ? "✓ Bridge connected" : "⚠ Bridge didn't connect (Doctor warning)",
 					v.flowCount !== undefined ? `✓ ${v.flowCount} flows / ${v.screenCount ?? 0} screens declared` : "",
-					v.fullPageReady ? "✓ Full-page capture ready" : "ℹ Full-page capture not yet wired (snap a screen, then wrap content in <View ref={useSnapTarget()} collapsable={false}>)",
+					v.fullPageReady ? "✓ Full-page capture ready" : "ℹ Full-page capture is opt-in — default snap uses iOS Sim viewport. Wrap individual ScrollView content in <View ref={useSnapTarget()}> only on screens where you want long-page snaps.",
 					...v.notes.map((n) => `· ${n}`),
 				]
 				.filter(Boolean)
@@ -581,11 +585,70 @@ export function openWizardV2(deps: WizardDeps): void {
 				.join("")
 			: "<li>Skipped verify (you toggled it off in Plan).</li>";
 		card.className = "wiz2-verify-card wiz2-verify-ok";
+		const slug = state.plan?.slug ?? "";
 		card.innerHTML = `
 			<h3>Done — ready to snap</h3>
 			<ul class="wiz2-verify-checks">${verifyLines}</ul>
+			<div class="wiz2-improve">
+				<div class="wiz2-improve-title">✨ Improve flow grouping</div>
+				<p class="wiz2-improve-body">Default flows are path-based — fine for snapping but rough on real user journeys. Hand them to Claude Code with screen context (JSDoc, imports, top strings) and get back a regrouped <code>snap-flows.ts</code> in seconds.</p>
+				<div class="wiz2-improve-actions">
+					<button type="button" class="btn btn-secondary wiz2-improve-btn" data-slug="${escapeHtml(slug)}">Copy improver prompt</button>
+					<span class="wiz2-improve-status" aria-live="polite"></span>
+				</div>
+				<p class="wiz2-improve-hint">Paste into Claude Code in your project's repo, save the suggested <code>snap-flows.ts</code> over the existing one, then click Refresh on the project card to re-ingest.</p>
+			</div>
 		`;
+		const improveBtn = card.querySelector<HTMLButtonElement>(".wiz2-improve-btn");
+		const improveStatus = card.querySelector<HTMLElement>(".wiz2-improve-status");
+		if (improveBtn && improveStatus && slug) {
+			improveBtn.addEventListener("click", () =>
+				void runImprover(slug, improveBtn, improveStatus),
+			);
+		} else if (improveBtn) {
+			improveBtn.disabled = true;
+		}
 		nextBtn.textContent = "Open project";
+	}
+
+	async function runImprover(
+		slug: string,
+		btn: HTMLButtonElement,
+		statusEl: HTMLElement,
+	): Promise<void> {
+		btn.disabled = true;
+		statusEl.textContent = "Building prompt…";
+		try {
+			const r = (await deps.req.improveSnapFlows({ slug })) as
+				| { ok: true; clipboardPayload: string; flowsFilePath: string; summary: string }
+				| { ok: false; error: string };
+			if (!r.ok) {
+				statusEl.textContent = `Failed: ${r.error}`;
+				deps.log(`Improver failed: ${r.error}`, "error");
+				btn.disabled = false;
+				return;
+			}
+			const copied = await copyToClipboard(r.clipboardPayload);
+			if (copied) {
+				statusEl.textContent = `Copied (${r.summary}) — paste into Claude Code`;
+				deps.log(`✨ Improver prompt copied (${r.summary})`, "success");
+				btn.textContent = "✓ Copied";
+			} else {
+				statusEl.textContent =
+					"Couldn't access the clipboard — opening a fallback window";
+				deps.log(
+					"Clipboard blocked by WKWebView — opened the prompt in a viewer window so you can copy manually",
+					"warn",
+				);
+				openPromptViewer(r.clipboardPayload, r.summary);
+				btn.textContent = "View prompt";
+				btn.disabled = false;
+			}
+		} catch (err) {
+			statusEl.textContent = `Failed: ${(err as Error).message}`;
+			deps.log(`Improver crashed: ${(err as Error).message}`, "error");
+			btn.disabled = false;
+		}
 	}
 
 	// ── controls ──────────────────────────────────────────────────────────
@@ -667,6 +730,75 @@ export function openWizardV2(deps: WizardDeps): void {
 
 // ── small utils ─────────────────────────────────────────────────────────
 
+/**
+ * Copy to clipboard with WKWebView-safe fallback. The async Clipboard API
+ * needs an "allow access" permission that WKWebView usually denies, so we
+ * fall back to the legacy textarea + execCommand("copy") trick which works
+ * inside any user-gesture handler. Returns true on success.
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+	try {
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch {
+		// permission denied — fall through to legacy path
+	}
+	try {
+		const ta = document.createElement("textarea");
+		ta.value = text;
+		ta.style.position = "fixed";
+		ta.style.opacity = "0";
+		ta.style.pointerEvents = "none";
+		ta.setAttribute("readonly", "readonly");
+		document.body.appendChild(ta);
+		ta.select();
+		ta.setSelectionRange(0, text.length);
+		const ok = document.execCommand("copy");
+		document.body.removeChild(ta);
+		return ok;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Last-resort viewer: clipboard blocked + execCommand failed. Show the
+ * prompt in a scrollable, pre-selected `<textarea>` so the user can
+ * Cmd+A / Cmd+C themselves.
+ */
+function openPromptViewer(text: string, summary: string): void {
+	const backdrop = document.createElement("div");
+	backdrop.className = "wiz2-prompt-backdrop";
+	backdrop.innerHTML = `
+		<div class="wiz2-prompt-dialog">
+			<div class="wiz2-prompt-header">
+				<div class="wiz2-prompt-title">Improver prompt — ${summary}</div>
+				<button type="button" class="wiz2-prompt-close" aria-label="Close">×</button>
+			</div>
+			<p class="wiz2-prompt-hint">Clipboard access was blocked by WKWebView. Click in the box, then ⌘A → ⌘C to copy.</p>
+			<textarea class="wiz2-prompt-text" readonly></textarea>
+		</div>
+	`;
+	const ta = backdrop.querySelector<HTMLTextAreaElement>(".wiz2-prompt-text");
+	const closeBtn = backdrop.querySelector<HTMLButtonElement>(".wiz2-prompt-close");
+	if (ta) {
+		ta.value = text;
+		// Preselect so ⌘A is unnecessary in most cases.
+		setTimeout(() => {
+			ta.focus();
+			ta.select();
+		}, 50);
+	}
+	const close = () => backdrop.remove();
+	closeBtn?.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.body.appendChild(backdrop);
+}
+
 function makeBtn(label: string, className: string): HTMLButtonElement {
 	const b = document.createElement("button");
 	b.type = "button";
@@ -694,6 +826,47 @@ function slugify(s: string): string {
 		.replace(/-+/g, "-")
 		.replace(/^-|-$/g, "")
 		.slice(0, 64) || "new-project";
+}
+
+/**
+ * Pick a sensible default slug for the project. Repo folder name beats
+ * package.json `name` because monorepos commonly use generic names ("mobile",
+ * "app", "frontend") at the package level — those collide across projects
+ * and don't tell the designer what they're capturing.
+ *
+ * Order:
+ *   1. Repo folder name (e.g. "ovria" from "/Users/x/ovria")
+ *   2. package.json name IF it's not a generic placeholder
+ *   3. "new-project"
+ */
+const GENERIC_PKG_NAMES = new Set([
+	"mobile",
+	"app",
+	"frontend",
+	"main",
+	"client",
+	"web",
+	"native",
+	"rn",
+	"react-native",
+]);
+
+function pickDefaultSlug(fp: RepoFingerprint): string {
+	const folderSlug = slugify(basename(fp.repoPath));
+	if (folderSlug && folderSlug !== "new-project") {
+		return folderSlug;
+	}
+	const pkgName = fp.picked?.packageJsonName;
+	if (pkgName && !GENERIC_PKG_NAMES.has(pkgName.toLowerCase())) {
+		return slugify(pkgName);
+	}
+	return "new-project";
+}
+
+function basename(path: string): string {
+	const trimmed = path.replace(/\/+$/, "");
+	const idx = trimmed.lastIndexOf("/");
+	return idx === -1 ? trimmed : trimmed.slice(idx + 1);
 }
 
 function titlecase(s: string): string {

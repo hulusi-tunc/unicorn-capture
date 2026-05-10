@@ -2,8 +2,6 @@ import { Electroview } from "electrobun/view";
 import type {
 	FlowResult,
 	RnFlow,
-	RnInitOutcome,
-	RnInitStep,
 	RnProjectInfo,
 	RnSnapInfo,
 	RunResult,
@@ -89,37 +87,6 @@ interface AppState {
 		 * project's snaps mixed together (only useful for debugging).
 		 */
 		selectedProjectSlug: string | null;
-		wizard: WizardState;
-	};
-}
-
-interface WizardState {
-	open: boolean;
-	repoPath: string;
-	slug: string;
-	name: string;
-	platformUrl: string;
-	platform: "ios" | "android" | "web";
-	setupToken: string;
-	busy: boolean;
-	error: string | null;
-	steps: RnInitStep[];
-	manualSnippet: string | null;
-}
-
-function freshWizardState(): WizardState {
-	return {
-		open: false,
-		repoPath: "",
-		slug: "",
-		name: "",
-		platformUrl: "http://localhost:3010",
-		platform: "ios",
-		setupToken: "",
-		busy: false,
-		error: null,
-		steps: [],
-		manualSnippet: null,
 	};
 }
 
@@ -184,7 +151,6 @@ const state = new Store<AppState>({
 		selectedIdx: -1,
 		registry: [],
 		selectedProjectSlug: null,
-		wizard: freshWizardState(),
 	},
 });
 
@@ -1885,13 +1851,185 @@ const enterProject = (slug: string): void => {
 		source: { ...cur.source, kind: type === "web" ? "url" : "iossim" },
 		rn: { ...cur.rn, selectedProjectSlug: slug },
 	}));
+	if (type === "mobile") {
+		// Pre-flight: re-scan the customer's app/ folder so any new routes added
+		// since the last session show up as placeholders. Fire-and-forget; the
+		// "what changed" banner picks up its results when the bridge re-emits.
+		void preflightRefresh(slug);
+		// Schedule the diff banner ~1.4s later so auto-refresh + bridge
+		// re-handshake have time to land before we compute the diff.
+		window.setTimeout(() => maybeShowChangesBanner(slug), 1400);
+	}
 };
 const leaveProject = (): void => {
+	dismissChangesBanner();
 	state.set((cur) => ({
 		...cur,
 		rn: { ...cur.rn, selectedProjectSlug: null },
 	}));
 };
+
+async function preflightRefresh(slug: string): Promise<void> {
+	try {
+		await req.refreshProjectFlows({ slug });
+	} catch {
+		// Silent — project may not have a CLI installed (manual snap-flows.ts);
+		// the existing decl stays in place.
+	}
+}
+
+// ── "What changed since last entry" banner ────────────────────────────────
+//
+// On enterProject, compares the current flow tree against the snapshot we
+// saved on the last entry. Surfaces added / removed / renamed flows so the
+// designer immediately sees what's new without having to scan the sidebar.
+// First-time entry: no banner, just record the snapshot.
+
+interface FlowSig {
+	id: string; // declaredId (or internal id when no decl)
+	name: string;
+	parentId?: string;
+}
+
+let activeChangesBanner: HTMLDivElement | null = null;
+let changesBannerTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flowsSignature(slug: string): FlowSig[] {
+	const r = state.get().rn;
+	return r.flows
+		.filter((f) => f.projectId === slug)
+		.map<FlowSig>((f) => ({
+			id: f.declaredId ?? f.id,
+			name: f.name,
+			parentId: f.parentFlowId,
+		}))
+		.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+interface ChangeReport {
+	added: FlowSig[];
+	removed: FlowSig[];
+	renamed: Array<{ id: string; from: string; to: string }>;
+}
+
+function diffSignatures(prev: FlowSig[], next: FlowSig[]): ChangeReport {
+	const prevById = new Map(prev.map((f) => [f.id, f]));
+	const nextById = new Map(next.map((f) => [f.id, f]));
+	const added: FlowSig[] = [];
+	const removed: FlowSig[] = [];
+	const renamed: Array<{ id: string; from: string; to: string }> = [];
+	for (const f of next) {
+		const before = prevById.get(f.id);
+		if (!before) added.push(f);
+		else if (before.name !== f.name)
+			renamed.push({ id: f.id, from: before.name, to: f.name });
+	}
+	for (const f of prev) {
+		if (!nextById.has(f.id)) removed.push(f);
+	}
+	return { added, removed, renamed };
+}
+
+function maybeShowChangesBanner(slug: string): void {
+	const key = `prisma:lastFlowSig:${slug}`;
+	const current = flowsSignature(slug);
+	const stored = readLocal(key);
+	let prev: FlowSig[] | null = null;
+	if (stored) {
+		try {
+			const parsed = JSON.parse(stored);
+			if (Array.isArray(parsed)) prev = parsed as FlowSig[];
+		} catch {
+			prev = null;
+		}
+	}
+	// Always update the snapshot — even if banner doesn't render, we want
+	// the next entry to compare against the latest state.
+	writeLocal(key, JSON.stringify(current));
+	if (!prev || prev.length === 0) return; // first entry: nothing to compare
+	const diff = diffSignatures(prev, current);
+	const hasChanges =
+		diff.added.length > 0 || diff.removed.length > 0 || diff.renamed.length > 0;
+	if (!hasChanges) return;
+	renderChangesBanner(diff);
+}
+
+function renderChangesBanner(diff: ChangeReport): void {
+	dismissChangesBanner();
+	const banner = ce("div", "rn-changes-banner");
+	banner.setAttribute("role", "status");
+	banner.setAttribute("aria-live", "polite");
+
+	const icon = ce("span", "rn-changes-icon");
+	icon.textContent = "✨";
+
+	const body = ce("div", "rn-changes-body");
+	const heading = ce("div", "rn-changes-heading");
+	const parts: string[] = [];
+	if (diff.added.length > 0) parts.push(`${diff.added.length} new`);
+	if (diff.removed.length > 0) parts.push(`${diff.removed.length} removed`);
+	if (diff.renamed.length > 0) parts.push(`${diff.renamed.length} renamed`);
+	heading.textContent = `Changes since last visit — ${parts.join(" · ")}`;
+
+	const detail = ce("div", "rn-changes-detail");
+	const lines: string[] = [];
+	if (diff.added.length > 0) {
+		const names = diff.added.slice(0, 3).map((f) => f.name).join(", ");
+		const more = diff.added.length > 3 ? `, +${diff.added.length - 3} more` : "";
+		lines.push(`<b>New:</b> ${escapeHtmlSimple(names)}${more}`);
+	}
+	if (diff.removed.length > 0) {
+		const names = diff.removed.slice(0, 3).map((f) => f.name).join(", ");
+		const more =
+			diff.removed.length > 3 ? `, +${diff.removed.length - 3} more` : "";
+		lines.push(`<b>Removed:</b> ${escapeHtmlSimple(names)}${more}`);
+	}
+	if (diff.renamed.length > 0) {
+		const names = diff.renamed
+			.slice(0, 3)
+			.map((r) => `${r.from} → ${r.to}`)
+			.join(", ");
+		const more =
+			diff.renamed.length > 3 ? `, +${diff.renamed.length - 3} more` : "";
+		lines.push(`<b>Renamed:</b> ${escapeHtmlSimple(names)}${more}`);
+	}
+	detail.innerHTML = lines.join("<br>");
+
+	body.append(heading, detail);
+
+	const close = ce("button", "rn-changes-close");
+	close.type = "button";
+	close.setAttribute("aria-label", "Dismiss");
+	close.textContent = "×";
+	close.addEventListener("click", dismissChangesBanner);
+
+	banner.append(icon, body, close);
+	document.body.appendChild(banner);
+	activeChangesBanner = banner;
+
+	// Auto-dismiss after 12s — long enough to read, short enough to not
+	// linger across project work.
+	changesBannerTimer = setTimeout(dismissChangesBanner, 12000);
+}
+
+function dismissChangesBanner(): void {
+	if (changesBannerTimer) {
+		clearTimeout(changesBannerTimer);
+		changesBannerTimer = null;
+	}
+	if (!activeChangesBanner) return;
+	activeChangesBanner.classList.add("is-leaving");
+	const node = activeChangesBanner;
+	activeChangesBanner = null;
+	setTimeout(() => node.remove(), 240);
+}
+
+function escapeHtmlSimple(s: string): string {
+	return s
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
 
 // Search query is dashboard-local (not in app state since it has no other use).
 let dashSearchQuery = "";
@@ -1925,6 +2063,13 @@ gtbSearchInput.addEventListener("input", () => {
 	dashSearchQuery = gtbSearchInput.value;
 	if (dashRefs) renderDashboardCards(dashRefs);
 });
+
+// Project-mode context block: shows the active project's name + bridge status.
+// Replaces the old right-side context panel — same data, less chrome.
+const gtbContextName = document.getElementById("gtb-context-name") as HTMLDivElement;
+const gtbContextPill = document.getElementById("gtb-context-pill") as HTMLButtonElement;
+const gtbContextDot = document.getElementById("gtb-context-dot") as HTMLSpanElement;
+const gtbContextPillLabel = document.getElementById("gtb-context-pill-label") as HTMLSpanElement;
 
 // Dashboard action: Add project (opens type chooser).
 const gtbAddBtn = document.createElement("button");
@@ -1981,11 +2126,9 @@ function syncGlobalTopbar(): void {
 	const slug = state.get().rn.selectedProjectSlug;
 	if (slug == null) {
 		document.body.dataset.mode = "dashboard";
-		gtbSearchInput.style.display = "";
 	} else {
 		const type = projectTypeOf(slug);
 		document.body.dataset.mode = type === "web" ? "web" : "mobile";
-		gtbSearchInput.style.display = "none";
 	}
 }
 
@@ -2002,21 +2145,48 @@ state.subscribe((s) => {
 	gtbNewSessionBtn.disabled = r.snaps.length === 0 || r.busy;
 	const projectName =
 		(slug && r.registry.find((p) => p.slug === slug)?.name) || slug;
+
+	// Topbar project context (only meaningful when inside a project).
+	if (slug) {
+		const projectIsConnected = r.projects.includes(slug);
+		gtbContextName.textContent = projectName ?? slug;
+		gtbContextDot.className = projectIsConnected ? "dot success" : "dot warn";
+		gtbContextPillLabel.textContent = projectIsConnected
+			? "Connected"
+			: "Waiting for snap-bridge…";
+		gtbContextPill.title = projectIsConnected
+			? `snap-bridge connected (port 9876)`
+			: `No snap-bridge yet. In your RN app's root layout, install @unicorn-studio/snap-bridge and call installSnapBridge({projectId: "${slug}"}). Listening on port 9876.`;
+		gtbContextPill.classList.toggle("is-connected", projectIsConnected);
+	} else {
+		gtbContextName.textContent = "";
+		gtbContextPillLabel.textContent = "";
+		gtbContextPill.title = "";
+	}
 	const hasAny = projectSnaps.length > 0;
+	const pendingCount = projectSnaps.filter((n) => !n.uploaded).length;
+	const allPushed = hasAny && pendingCount === 0;
 	gtbPushBtn.disabled = r.pushing || r.busy || !hasAny;
 	gtbPushBtn.classList.toggle("is-busy", r.pushing);
+	gtbPushBtn.classList.toggle("is-repush", allPushed && !r.pushing);
+	const target = projectName ? `to ${projectName}` : "to web";
 	const pushLabel = r.pushing
 		? `Pushing… (${projectSnaps.length})`
-		: hasAny
-			? projectName
-				? `Push ${projectSnaps.length} to ${projectName}`
-				: `Push ${projectSnaps.length} to web`
-			: "Nothing to push";
-	setBtnIcon(gtbPushBtn, r.pushing ? "loader" : "upload", pushLabel);
+		: !hasAny
+			? "Nothing to push"
+			: allPushed
+				? `↻ Re-push ${projectSnaps.length} ${target}`
+				: `Push ${pendingCount} ${target}`;
+	setBtnIcon(gtbPushBtn, r.pushing ? "loader" : allPushed ? "refresh-cw" : "upload", pushLabel);
 });
 syncGlobalTopbar();
 
 state.subscribe(() => render());
+
+// Load project registry unconditionally at boot so the dashboard cards
+// render immediately. Previously this only fired when source.kind became
+// "iossim", which left the dashboard empty until the user opened a project.
+void refreshProjectRegistry();
 
 log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
 
@@ -2054,32 +2224,9 @@ log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
 
 interface RnRefs {
 	root: HTMLDivElement;
-	projectsList: HTMLDivElement;
-	projectsAddBtn: HTMLButtonElement;
 	flowsList: HTMLDivElement;
-	bridgeDot: HTMLSpanElement;
-	bridgeTitle: HTMLDivElement;
-	bridgeSub: HTMLDivElement;
-	bridgeHint: HTMLParagraphElement;
-	sessionIdText: HTMLDivElement;
-	sessionCountText: HTMLDivElement;
 	previewBox: HTMLDivElement;
 	recentBox: HTMLDivElement;
-	// modal
-	modalBackdrop: HTMLDivElement;
-	modalRepoInput: HTMLInputElement;
-	modalSlugInput: HTMLInputElement;
-	modalNameInput: HTMLInputElement;
-	modalUrlInput: HTMLInputElement;
-	modalTokenInput: HTMLInputElement;
-	modalBrowseBtn: HTMLButtonElement;
-	modalCancelBtn: HTMLButtonElement;
-	modalSubmitBtn: HTMLButtonElement;
-	modalCloseBtn: HTMLButtonElement;
-	modalStepsBox: HTMLDivElement;
-	modalErrorBox: HTMLDivElement;
-	modalManualBox: HTMLDivElement;
-	modalManualPre: HTMLPreElement;
 }
 
 let rnRefs: RnRefs | null = null;
@@ -2145,46 +2292,6 @@ function buildRnLayout(): RnRefs {
 		saveSidebarCollapsed(false);
 	});
 
-	// Right context panel ("where am I capturing from"): source, projects,
-	// bridge status, session info. Mirrors the web's right rail.
-	const rightPanel = ce("aside", "rn-rightpanel");
-	if (loadRightPanelCollapsed()) layout.classList.add("rn-layout-rcollapsed");
-
-	const rightCollapseBtn = ce("button", "rn-rightpanel-collapse");
-	rightCollapseBtn.type = "button";
-	rightCollapseBtn.title = "Collapse context panel";
-	rightCollapseBtn.setAttribute("aria-label", "Collapse context panel");
-	rightCollapseBtn.appendChild(icon("panel-right-close", { size: 14 }));
-	rightCollapseBtn.addEventListener("click", () => {
-		layout.classList.add("rn-layout-rcollapsed");
-		saveRightPanelCollapsed(true);
-	});
-
-	const rightExpandBtn = ce("button", "rn-rightpanel-expand");
-	rightExpandBtn.type = "button";
-	rightExpandBtn.title = "Show context panel";
-	rightExpandBtn.setAttribute("aria-label", "Show context panel");
-	rightExpandBtn.appendChild(icon("panel-right-open", { size: 14 }));
-	rightExpandBtn.addEventListener("click", () => {
-		layout.classList.remove("rn-layout-rcollapsed");
-		saveRightPanelCollapsed(false);
-	});
-
-	// Projects section
-	const projectsSection = ce("div", "section");
-	const projectsTitle = ce("div", "section-title row");
-	const projectsTitleSpan = ce("span");
-	projectsTitleSpan.textContent = "Projects";
-	const projectsAddBtn = ce("button", "btn btn-primary btn-sm");
-	projectsAddBtn.textContent = "+ Add";
-	projectsAddBtn.title = "Add a new project";
-	const projectsTitleActions = ce("span", "row");
-	projectsTitleActions.style.gap = "4px";
-	projectsTitleActions.appendChild(projectsAddBtn);
-	projectsTitle.append(projectsTitleSpan, projectsTitleActions);
-	const projectsList = ce("div", "rn-projects");
-	projectsSection.append(projectsTitle, projectsList);
-
 	// Flows section — tree of flows in the active project, click to focus
 	const flowsSection = ce("div", "section");
 	const flowsTitle = ce("div", "section-title");
@@ -2192,205 +2299,30 @@ function buildRnLayout(): RnRefs {
 	const flowsList = ce("div", "rn-flows-side");
 	flowsSection.append(flowsTitle, flowsList);
 
-	// Bridge section
-	const bridgeSection = ce("div", "section");
-	const bridgeTitleHeader = ce("div", "section-title");
-	bridgeTitleHeader.textContent = UI.rn.title;
-	const bridgeStatus = ce("div", "rn-status");
-	const bridgeDot = ce("span", "dot warn");
-	const bridgeTextWrap = ce("div");
-	const bridgeTitle = ce("div", "rn-status-title");
-	bridgeTitle.textContent = UI.rn.bridge.waiting;
-	const bridgeSub = ce("div", "rn-status-sub");
-	bridgeSub.textContent = "port 9876";
-	bridgeTextWrap.append(bridgeTitle, bridgeSub);
-	bridgeStatus.append(bridgeDot, bridgeTextWrap);
-	const bridgeHint = ce("p", "rn-hint");
-	bridgeHint.textContent = UI.rn.bridge.noBridge;
-	bridgeSection.append(bridgeTitleHeader, bridgeStatus, bridgeHint);
-
-	// Session section
-	const sessionSection = ce("div", "section");
-	const sessionTitle = ce("div", "section-title");
-	sessionTitle.textContent = UI.rn.recent.title;
-	const sessionMeta = ce("div", "rn-session-meta");
-	const sessionIdText = ce("div", "rn-session-id");
-	sessionIdText.textContent = "—";
-	const sessionCountText = ce("div", "rn-session-count");
-	sessionCountText.textContent = "0 snaps";
-	sessionMeta.append(sessionIdText, sessionCountText);
-	sessionSection.append(sessionTitle, sessionMeta);
-
 	// LEFT sidebar: just the flows tree. Primary navigation, mirrors web.
+	// Right context panel was removed — its info (project name + bridge
+	// status) now lives in the global topbar (`#gtb-context`). Project
+	// switching happens on the dashboard, not in-project.
 	sidebar.append(sidebarCollapseBtn, flowsSection);
-
-	// RIGHT panel: capture context (projects / bridge / session). Source
-	// tabs moved to the top header — they're app-level mode, not context.
-	rightPanel.append(
-		rightCollapseBtn,
-		projectsSection,
-		bridgeSection,
-		sessionSection,
-	);
 
 	// MAIN — snap grid card. previewBox is kept as the main scroller; we
 	// populate it with a grid of snap cards in applyRnState (no separate
 	// "preview" + "recent" split anymore).
 	const main = ce("main", "rn-main");
 	main.appendChild(sidebarExpandBtn);
-	main.appendChild(rightExpandBtn);
 	const previewBox = ce("div", "rn-grid-scroll");
 	main.appendChild(previewBox);
 	const recentBox = previewBox; // alias — same container, just renamed in refs
 
-	layout.append(sidebar, main, rightPanel);
+	layout.append(sidebar, main);
 	root.append(layout);
-
-	// ── MODAL (always in DOM, hidden by default) ──
-	const modalBackdrop = ce("div", "rn-modal-backdrop");
-	modalBackdrop.style.display = "none";
-	const modal = ce("div", "rn-modal");
-	const modalHeader = ce("div", "rn-modal-header");
-	const modalTitle = ce("div", "rn-modal-title");
-	modalTitle.textContent = "Add project";
-	const modalCloseBtn = ce("button", "btn btn-ghost btn-sm");
-	modalCloseBtn.textContent = "×";
-	modalHeader.append(modalTitle, modalCloseBtn);
-	const modalBody = ce("div", "rn-modal-body");
-
-	const fields: Array<[string, string, HTMLInputElement, HTMLButtonElement | null]> = [];
-	const mkField = (
-		label: string,
-		placeholder: string,
-		type = "text",
-		withBrowse = false,
-	): { input: HTMLInputElement; browseBtn: HTMLButtonElement | null } => {
-		const fieldLabel = ce("label", "rn-field");
-		const span = ce("span");
-		span.textContent = label;
-		fieldLabel.appendChild(span);
-		const input = ce("input", "input");
-		input.type = type;
-		input.placeholder = placeholder;
-		let browseBtn: HTMLButtonElement | null = null;
-		if (withBrowse) {
-			const row = ce("div", "rn-field-row");
-			browseBtn = ce("button", "btn btn-secondary btn-sm");
-			browseBtn.textContent = "Browse…";
-			browseBtn.type = "button";
-			row.append(input, browseBtn);
-			fieldLabel.appendChild(row);
-		} else {
-			fieldLabel.appendChild(input);
-		}
-		modalBody.appendChild(fieldLabel);
-		fields.push([label, placeholder, input, browseBtn]);
-		return { input, browseBtn };
-	};
-
-	const repo = mkField("Repo path", "/path/to/customer-repo", "text", true);
-	const slug = mkField("Slug", "acme-fitness");
-	const name = mkField("Display name", "Acme Fitness");
-	const url = mkField("Platform URL", "http://localhost:3010");
-	url.input.value = "http://localhost:3010";
-	const token = mkField("Setup token", "setup_…", "password");
-
-	const modalErrorBox = ce("div", "rn-wizard-error");
-	modalErrorBox.style.display = "none";
-	modalBody.appendChild(modalErrorBox);
-	const modalStepsBox = ce("div", "rn-wizard-steps");
-	modalStepsBox.style.display = "none";
-	modalBody.appendChild(modalStepsBox);
-	const modalManualBox = ce("div", "rn-wizard-manual");
-	modalManualBox.style.display = "none";
-	const modalManualTitle = ce("div", "rn-wizard-manual-title");
-	modalManualTitle.textContent = "Couldn't auto-edit your root layout — paste this snippet:";
-	const modalManualPre = ce("pre", "rn-wizard-snippet");
-	modalManualBox.append(modalManualTitle, modalManualPre);
-	modalBody.appendChild(modalManualBox);
-
-	const modalFooter = ce("div", "rn-modal-footer");
-	const modalCancelBtn = ce("button", "btn btn-ghost");
-	modalCancelBtn.textContent = "Cancel";
-	const modalSubmitBtn = ce("button", "btn btn-primary");
-	modalSubmitBtn.textContent = "Setup project →";
-	modalFooter.append(modalCancelBtn, modalSubmitBtn);
-
-	modal.append(modalHeader, modalBody, modalFooter);
-	modalBackdrop.appendChild(modal);
-	root.appendChild(modalBackdrop);
 
 	const refs: RnRefs = {
 		root,
-		projectsList,
-		projectsAddBtn,
 		flowsList,
-		bridgeDot,
-		bridgeTitle,
-		bridgeSub,
-		bridgeHint,
-		sessionIdText,
-		sessionCountText,
 		previewBox,
 		recentBox,
-		modalBackdrop,
-		modalRepoInput: repo.input,
-		modalSlugInput: slug.input,
-		modalNameInput: name.input,
-		modalUrlInput: url.input,
-		modalTokenInput: token.input,
-		modalBrowseBtn: repo.browseBtn!,
-		modalCancelBtn,
-		modalSubmitBtn,
-		modalCloseBtn,
-		modalStepsBox,
-		modalErrorBox,
-		modalManualBox,
-		modalManualPre,
 	};
-
-	// ── EVENT WIRING (once) ──
-	// Source tabs + global action buttons (theme/run/snap/push/new session)
-	// live in #global-topbar (index.html); their listeners are wired in init.
-	projectsAddBtn.addEventListener("click", () => {
-		// New 4-phase stepper. The old single-page wizard (openWizard) is
-		// still defined below as a fallback while we shake the new flow out.
-		openWizardV2({
-			req: {
-				pickRepoPath: req.pickRepoPath,
-				detectRepo: req.detectRepo,
-				runInstaller: req.runInstaller,
-			},
-			subscribeProgress: subscribeInstallProgress,
-			log,
-			readLocal,
-			writeLocal,
-			refreshProjectRegistry,
-		});
-	});
-
-	modalCloseBtn.addEventListener("click", () => closeWizard());
-	modalCancelBtn.addEventListener("click", () => closeWizard());
-	modalBackdrop.addEventListener("click", (e) => {
-		if (e.target === modalBackdrop) closeWizard();
-	});
-	repo.browseBtn?.addEventListener("click", () => void doBrowse());
-	modalSubmitBtn.addEventListener("click", () => void doSubmitWizard());
-	// Auto-fill slug + name when repo path is set
-	repo.input.addEventListener("change", () => {
-		const path = repo.input.value;
-		if (!path) return;
-		const auto = path
-			.split("/")
-			.filter(Boolean)
-			.pop()!
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-|-$/g, "");
-		if (!slug.input.value) slug.input.value = auto;
-		if (!name.input.value)
-			name.input.value = auto.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-	});
 
 	return refs;
 }
@@ -2587,7 +2519,37 @@ function renderDashboardCards(refs: DashRefs): void {
 		const slugEl = ce("div", "dash-card-slug");
 		slugEl.textContent = p.slug;
 
-		card.append(top, nameEl, slugEl);
+		// Hover-revealed action row, top-right of the card.
+		// Refresh re-runs snap-flows-scan; remove drops the project from
+		// Capture's local registry (doesn't touch the customer repo).
+		const actions = ce("div", "dash-card-actions");
+		const refreshBtn = ce("button", "dash-card-action");
+		refreshBtn.type = "button";
+		refreshBtn.title =
+			"Re-scan app/ folder and regenerate snap-flows.ts (run after route changes)";
+		refreshBtn.setAttribute("aria-label", `Refresh flows for ${p.slug}`);
+		refreshBtn.appendChild(icon("refresh-cw", { size: 14 }));
+		refreshBtn.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			ev.preventDefault();
+			void doRefreshProjectFlows(p.slug, p.name, refreshBtn);
+		});
+
+		const removeBtn = ce("button", "dash-card-action dash-card-action-danger");
+		removeBtn.type = "button";
+		removeBtn.title =
+			"Remove this project from Capture (doesn't touch the repo or platform)";
+		removeBtn.setAttribute("aria-label", `Remove project ${p.slug}`);
+		removeBtn.appendChild(icon("trash", { size: 14 }));
+		removeBtn.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			ev.preventDefault();
+			void doRemoveProject(p.slug, p.name);
+		});
+
+		actions.append(refreshBtn, removeBtn);
+
+		card.append(top, nameEl, slugEl, actions);
 		card.addEventListener("click", () => enterProject(p.slug));
 		refs.cardsGrid.appendChild(card);
 	}
@@ -2646,7 +2608,24 @@ function openAddTypeChooser(): void {
 		"iOS Simulator + snap-bridge from your RN app.",
 		() => {
 			close();
-			openWizard();
+			try {
+				openWizardV2({
+					req: {
+						pickRepoPath: req.pickRepoPath,
+						detectRepo: req.detectRepo,
+						runInstaller: req.runInstaller,
+						improveSnapFlows: req.improveSnapFlows,
+					},
+					subscribeProgress: subscribeInstallProgress,
+					log,
+					readLocal,
+					writeLocal,
+					refreshProjectRegistry,
+				});
+			} catch (err) {
+				log(`Wizard failed to open: ${(err as Error).message}`, "error");
+				console.error("openWizardV2 threw:", err);
+			}
 		},
 	);
 	const webTile = mkTile(
@@ -2797,6 +2776,7 @@ function openAddWebForm(): void {
 // ─── WEB MODE LAYOUT (URL / Local) ───
 // Mirrors the iOS Sim editorial shell: 3 columns + persistent center iframe.
 // Capture system is wired in a later pass; this is the UI scaffold.
+type WebTab = "live" | "library";
 interface WebRefs {
 	root: HTMLDivElement;
 	urlInput: HTMLInputElement;
@@ -2810,6 +2790,13 @@ interface WebRefs {
 	sourceLoadBtn: HTMLButtonElement;
 	sourceDropzone: HTMLDivElement;
 	sessionMeta: HTMLDivElement;
+	tabLive: HTMLButtonElement;
+	tabLibrary: HTMLButtonElement;
+	paneLive: HTMLDivElement;
+	paneLibrary: HTMLDivElement;
+	libraryGrid: HTMLDivElement;
+	setTab: (tab: WebTab) => void;
+	getTab: () => WebTab;
 }
 let webRefs: WebRefs | null = null;
 
@@ -2830,9 +2817,24 @@ function buildWebLayout(): WebRefs {
 	flowsList.appendChild(empty);
 	sidebar.append(flowsTitle, flowsList);
 
-	// MIDDLE — URL bar + iframe + filmstrip
+	// MIDDLE — Tab strip (Live | Library) + tab panes
 	const main = ce("main", "web-main");
 
+	// Tab strip header
+	const tabStrip = ce("div", "web-tabs tabs");
+	const tabLive = ce("button", "tab is-active");
+	tabLive.type = "button";
+	tabLive.append(icon("play", { size: 12 }), document.createTextNode("Live"));
+	const tabLibrary = ce("button", "tab");
+	tabLibrary.type = "button";
+	tabLibrary.append(
+		icon("image", { size: 12 }),
+		document.createTextNode("Library"),
+	);
+	tabStrip.append(tabLive, tabLibrary);
+
+	// LIVE pane — URL bar + iframe + filmstrip
+	const paneLive = ce("div", "web-pane web-pane-live is-active");
 	const urlBar = ce("div", "web-urlbar");
 	const reloadBtn = ce("button", "btn btn-ghost btn-icon btn-sm");
 	reloadBtn.title = "Reload";
@@ -2861,7 +2863,24 @@ function buildWebLayout(): WebRefs {
 	filmstrip.appendChild(filmEmpty);
 	filmstripWrap.append(filmstripLabel, filmstrip);
 
-	main.append(urlBar, stage, filmstripWrap);
+	paneLive.append(urlBar, stage, filmstripWrap);
+
+	// LIBRARY pane — snap gallery grouped by flow (placeholder until system is wired)
+	const paneLibrary = ce("div", "web-pane web-pane-library");
+	const libraryEmpty = ce("div", "web-library-empty");
+	const libIcon = ce("div", "web-library-empty-icon");
+	libIcon.appendChild(icon("image", { size: 28, strokeWidth: 1.5 }));
+	const libTitle = ce("div", "web-library-empty-title");
+	libTitle.textContent = "No snaps yet";
+	const libHint = ce("div", "web-library-empty-hint");
+	libHint.textContent =
+		"Switch to Live, load a URL and snap to start building your library.";
+	libraryEmpty.append(libIcon, libTitle, libHint);
+	const libraryGrid = ce("div", "web-library-grid");
+	libraryGrid.appendChild(libraryEmpty);
+	paneLibrary.appendChild(libraryGrid);
+
+	main.append(tabStrip, paneLive, paneLibrary);
 
 	// RIGHT — context (Source URL/dropzone, Project, Session)
 	const rightPanel = ce("aside", "web-rightpanel");
@@ -2911,6 +2930,22 @@ function buildWebLayout(): WebRefs {
 	layout.append(sidebar, main, rightPanel);
 	root.appendChild(layout);
 
+	let currentTab: WebTab = "live";
+	const setTab = (tab: WebTab): void => {
+		currentTab = tab;
+		const liveActive = tab === "live";
+		tabLive.classList.toggle("is-active", liveActive);
+		tabLive.classList.toggle("active", liveActive);
+		tabLibrary.classList.toggle("is-active", !liveActive);
+		tabLibrary.classList.toggle("active", !liveActive);
+		paneLive.classList.toggle("is-active", liveActive);
+		paneLibrary.classList.toggle("is-active", !liveActive);
+	};
+	tabLive.addEventListener("click", () => setTab("live"));
+	tabLibrary.addEventListener("click", () => setTab("library"));
+	// Initialize active state classes (mirror is-active to legacy `active` for tab styling parity).
+	tabLive.classList.add("active");
+
 	const refs: WebRefs = {
 		root,
 		urlInput,
@@ -2924,6 +2959,13 @@ function buildWebLayout(): WebRefs {
 		sourceLoadBtn,
 		sourceDropzone,
 		sessionMeta,
+		tabLive,
+		tabLibrary,
+		paneLive,
+		paneLibrary,
+		libraryGrid,
+		setTab,
+		getTab: () => currentTab,
 	};
 
 	// Wire URL bar + sidebar source: typing in either updates state.source.url;
@@ -3003,28 +3045,6 @@ function switchSource(kind: SourceKind): void {
 	}));
 }
 
-function openWizard(): void {
-	if (!rnRefs) return;
-	rnRefs.modalErrorBox.style.display = "none";
-	rnRefs.modalErrorBox.textContent = "";
-	rnRefs.modalStepsBox.style.display = "none";
-	rnRefs.modalStepsBox.replaceChildren();
-	rnRefs.modalManualBox.style.display = "none";
-	rnRefs.modalRepoInput.value = "";
-	rnRefs.modalSlugInput.value = "";
-	rnRefs.modalNameInput.value = "";
-	// Pre-fill the platform URL + setup token from the last successful run.
-	// Both are typically identical across all projects in a workspace, so
-	// re-typing them every time is just friction.
-	const savedUrl = readLocal("capture.platformUrl");
-	const savedToken = readLocal("capture.setupToken");
-	rnRefs.modalUrlInput.value =
-		rnRefs.modalUrlInput.value || savedUrl || "http://localhost:3010";
-	rnRefs.modalTokenInput.value = savedToken;
-	setWizardBusy(false);
-	rnRefs.modalBackdrop.style.display = "flex";
-}
-
 function readLocal(key: string): string {
 	try {
 		return window.localStorage.getItem(key) ?? "";
@@ -3036,112 +3056,6 @@ function writeLocal(key: string, value: string): void {
 	try {
 		window.localStorage.setItem(key, value);
 	} catch {}
-}
-
-function closeWizard(): void {
-	if (!rnRefs) return;
-	rnRefs.modalBackdrop.style.display = "none";
-}
-
-function setWizardBusy(busy: boolean): void {
-	if (!rnRefs) return;
-	const inputs = [
-		rnRefs.modalRepoInput,
-		rnRefs.modalSlugInput,
-		rnRefs.modalNameInput,
-		rnRefs.modalUrlInput,
-		rnRefs.modalTokenInput,
-		rnRefs.modalBrowseBtn,
-		rnRefs.modalSubmitBtn,
-		rnRefs.modalCancelBtn,
-	];
-	for (const i of inputs) i.disabled = busy;
-	rnRefs.modalSubmitBtn.textContent = busy ? "Setting up…" : "Setup project →";
-}
-
-async function doBrowse(): Promise<void> {
-	try {
-		const r = await req.pickRepoPath({});
-		if (!r.ok || !rnRefs) return;
-		rnRefs.modalRepoInput.value = r.path;
-		rnRefs.modalRepoInput.dispatchEvent(new Event("change"));
-	} catch (err) {
-		showWizardError((err as Error).message);
-	}
-}
-
-function showWizardError(msg: string): void {
-	if (!rnRefs) return;
-	rnRefs.modalErrorBox.textContent = msg;
-	rnRefs.modalErrorBox.style.display = "block";
-}
-
-async function doSubmitWizard(): Promise<void> {
-	if (!rnRefs) return;
-	const repoPath = rnRefs.modalRepoInput.value.trim();
-	const slug = rnRefs.modalSlugInput.value.trim();
-	const name = rnRefs.modalNameInput.value.trim() || slug;
-	const platformUrl = rnRefs.modalUrlInput.value.trim();
-	const setupToken = rnRefs.modalTokenInput.value.trim();
-	if (!repoPath || !slug || !platformUrl || !setupToken) {
-		showWizardError("Repo path, slug, platform URL and setup token are required.");
-		return;
-	}
-	rnRefs.modalErrorBox.style.display = "none";
-	rnRefs.modalStepsBox.replaceChildren();
-	rnRefs.modalStepsBox.style.display = "block";
-	rnRefs.modalManualBox.style.display = "none";
-	setWizardBusy(true);
-	try {
-		const result = await req.initProject({
-			repoPath,
-			slug,
-			name,
-			platform: "ios",
-			platformUrl,
-			setupToken,
-		});
-		renderWizardSteps(result.steps ?? []);
-		if (!result.ok) {
-			showWizardError(result.error ?? "Unknown error");
-			setWizardBusy(false);
-			return;
-		}
-		log(`✓ Project "${result.slug}" set up`, "success");
-		// Remember the platform URL + setup token so the next "+ Add" run
-		// pre-fills both — they're typically identical across projects in
-		// the same workspace.
-		writeLocal("capture.platformUrl", platformUrl);
-		writeLocal("capture.setupToken", setupToken);
-		await refreshProjectRegistry();
-		const inj = result.layoutInjection;
-		if (inj && inj.mode === "manual") {
-			rnRefs.modalManualPre.textContent = inj.snippet;
-			rnRefs.modalManualBox.style.display = "block";
-			setWizardBusy(false);
-		} else {
-			setTimeout(closeWizard, 1500);
-		}
-	} catch (err) {
-		const msg = (err as Error).message;
-		showWizardError(msg);
-		log(`Setup RPC failed: ${msg}`, "error");
-		setWizardBusy(false);
-	}
-}
-
-function renderWizardSteps(steps: RnInitStep[]): void {
-	if (!rnRefs) return;
-	const box = rnRefs.modalStepsBox;
-	box.replaceChildren();
-	for (const s of steps) {
-		const row = ce("div", `rn-wizard-step rn-wizard-step-${s.kind}`);
-		const icon = ce("span");
-		icon.textContent = s.kind === "ok" ? "✓" : s.kind === "warn" ? "!" : s.kind === "error" ? "✗" : "·";
-		row.appendChild(icon);
-		row.appendChild(document.createTextNode(` ${s.message}`));
-		box.appendChild(row);
-	}
 }
 
 async function doSnap(): Promise<void> {
@@ -3757,98 +3671,9 @@ function applyRnState(s: AppState): void {
 		}
 	}
 
-	// Source tabs + header action buttons (Snap/Push/New session) live in
-	// #global-topbar — their state is wired via state.subscribe in init.
-
-	// Bridge status
-	const connected = r.clientCount > 0;
-	refs.bridgeDot.className = connected ? "dot success" : "dot warn";
-	refs.bridgeTitle.textContent = connected ? UI.rn.bridge.connected : UI.rn.bridge.waiting;
-	refs.bridgeSub.textContent = connected
-		? r.projects.join(", ") || "(unnamed project)"
-		: "port 9876";
-	refs.bridgeHint.style.display = connected ? "none" : "block";
-
-	// Session
-	refs.sessionIdText.textContent = r.sessionId || "—";
-	refs.sessionCountText.textContent = `${r.snaps.length} snap${r.snaps.length === 1 ? "" : "s"}`;
-
-	// Projects list
-	refs.projectsList.replaceChildren();
-	if (r.registry.length === 0) {
-		const empty = ce("div", "rn-projects-empty");
-		empty.innerHTML = `No projects yet. Click <b>+ Add</b> to onboard one.`;
-		refs.projectsList.appendChild(empty);
-	} else {
-		for (const p of r.registry) {
-			const item = ce("div", "rn-project");
-			const connected = r.projects.includes(p.slug);
-			const selected = r.selectedProjectSlug === p.slug;
-			if (connected) item.classList.add("connected");
-			if (selected) item.classList.add("active");
-			item.title = p.uploadUrl;
-			item.style.cursor = "pointer";
-			item.addEventListener("click", () => {
-				state.set((cur) => ({
-					...cur,
-					rn: {
-						...cur.rn,
-						selectedProjectSlug:
-							cur.rn.selectedProjectSlug === p.slug ? null : p.slug,
-					},
-				}));
-			});
-			const dot = ce("span", `dot ${connected ? "success" : "muted"}`);
-			const meta = ce("div", "rn-project-meta");
-			const nameEl = ce("div", "rn-project-name");
-			nameEl.textContent = p.name || p.slug;
-			const slugEl = ce("div", "rn-project-slug");
-			slugEl.textContent = p.slug;
-			meta.append(nameEl, slugEl);
-
-			const refreshBtn = ce("button", "rn-project-refresh");
-			refreshBtn.type = "button";
-			refreshBtn.setAttribute(
-				"aria-label",
-				`Refresh declared flows for ${p.slug}`,
-			);
-			refreshBtn.title =
-				"Re-scan app/ folder and regenerate snap-flows.ts (run after route changes)";
-			refreshBtn.innerHTML = `
-				<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M13.5 8a5.5 5.5 0 1 1-1.61-3.89"/>
-					<path d="M13.5 2.5v3h-3"/>
-				</svg>
-			`;
-			refreshBtn.addEventListener("click", (ev) => {
-				ev.stopPropagation();
-				ev.preventDefault();
-				void doRefreshProjectFlows(p.slug, p.name, refreshBtn);
-			});
-
-			const removeBtn = ce("button", "rn-project-remove");
-			removeBtn.type = "button";
-			removeBtn.setAttribute("aria-label", `Remove project ${p.slug}`);
-			removeBtn.title = "Remove this project from Capture";
-			removeBtn.innerHTML = `
-				<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M2.5 4h11"/>
-					<path d="M5.5 4V2.75a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75V4"/>
-					<path d="M3.5 4l.7 9.25a1 1 0 0 0 1 .92h5.6a1 1 0 0 0 1-.92L12.5 4"/>
-					<path d="M6.5 7v4"/>
-					<path d="M9.5 7v4"/>
-				</svg>
-			`;
-			removeBtn.addEventListener("click", (ev) => {
-				ev.stopPropagation();
-				ev.preventDefault();
-				void doRemoveProject(p.slug, p.name);
-			});
-
-			item.append(dot, meta, refreshBtn, removeBtn);
-			refs.projectsList.appendChild(item);
-		}
-	}
+	// Topbar (#gtb-context + action buttons) carries project name + bridge
+	// status; the dashboard handles project switching. applyRnState only
+	// owns the in-project view (flow tree + snap grid) now.
 
 	// Snap grid — flow sections in manifest order. Each flow has an editable
 	// title; cards within a flow are draggable, and you can drag a card from
@@ -4192,11 +4017,33 @@ function applyRnState(s: AppState): void {
 				void doDeleteSnap(snap);
 			});
 
+			// "Updated" badge — shown when this slot has new captures the
+			// user hasn't viewed yet (re-snap added a version since the
+			// last time they opened this card's lightbox). Click clears
+			// the badge AND opens the lightbox.
+			const versionCount = (snap.versions?.length ?? 0) + 1;
+			const seenKey = `prisma:seen:${snap.projectId}:${snap.sessionId}#${snap.sequence}`;
+			const seenCount = Number(readLocal(seenKey) || "0") || 0;
+			const isUpdated = versionCount > Math.max(seenCount, 1);
+			let versionBadge: HTMLSpanElement | null = null;
+			if (isUpdated) {
+				versionBadge = ce("span", "rn-card-updated");
+				versionBadge.title = `Re-snapped — ${versionCount} versions total. Click the card to compare.`;
+				versionBadge.textContent = "Updated";
+			}
+
 			// Click anywhere on the card opens a lightbox like the web frame page.
+			// Also marks this slot's version count as "seen" so the Updated badge
+			// fades. The badge will reappear after the next re-snap.
 			card.style.cursor = "zoom-in";
 			card.addEventListener("click", (ev) => {
 				const target = ev.target as HTMLElement;
 				if (target.closest(".rn-card-delete")) return;
+				writeLocal(seenKey, String(versionCount));
+				if (versionBadge && versionBadge.isConnected) {
+					versionBadge.classList.add("is-leaving");
+					setTimeout(() => versionBadge?.remove(), 200);
+				}
 				openSnapLightbox(snap, group.snaps);
 			});
 
@@ -4222,6 +4069,7 @@ function applyRnState(s: AppState): void {
 			cardSub.textContent = new Date(snap.capturedAt).toLocaleTimeString();
 			cardLabel.append(cardName, cardSub);
 
+			if (versionBadge) bezel.appendChild(versionBadge);
 			card.append(deleteBtn, bezel, cardLabel);
 			li.appendChild(card);
 
@@ -4446,7 +4294,6 @@ function cssEscape(s: string): string {
 }
 
 const SIDEBAR_COLLAPSED_KEY = "prisma:sidebar-collapsed";
-const RIGHTPANEL_COLLAPSED_KEY = "prisma:rightpanel-collapsed";
 function loadSidebarCollapsed(): boolean {
 	try {
 		return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
@@ -4457,18 +4304,6 @@ function loadSidebarCollapsed(): boolean {
 function saveSidebarCollapsed(value: boolean): void {
 	try {
 		localStorage.setItem(SIDEBAR_COLLAPSED_KEY, value ? "1" : "0");
-	} catch {}
-}
-function loadRightPanelCollapsed(): boolean {
-	try {
-		return localStorage.getItem(RIGHTPANEL_COLLAPSED_KEY) === "1";
-	} catch {
-		return false;
-	}
-}
-function saveRightPanelCollapsed(value: boolean): void {
-	try {
-		localStorage.setItem(RIGHTPANEL_COLLAPSED_KEY, value ? "1" : "0");
 	} catch {}
 }
 
@@ -4555,31 +4390,115 @@ function openSnapLightbox(
 		inspUpload,
 	);
 
+	// Version scrubber strip — sits below the bezel inside stageMain.
+	// Visible only when the active snap has past versions (re-snapped at
+	// least once). Clicking a chip swaps the bezel image to that capture.
+	const versionStrip = ce("div", "rn-lightbox-versions");
+
 	stageMain.append(prevBtn, bezel, nextBtn, inspector);
 
 	const footer = ce("div", "rn-lightbox-footer");
 	const counter = ce("span", "rn-lightbox-counter");
 	const hint = ce("span", "rn-lightbox-hint");
-	hint.innerHTML = "<kbd>←</kbd> <kbd>→</kbd> navigate · <kbd>Esc</kbd> close";
+	hint.innerHTML =
+		"<kbd>←</kbd> <kbd>→</kbd> siblings · <kbd>↑</kbd> <kbd>↓</kbd> versions · <kbd>Esc</kbd> close";
 	footer.append(counter, hint);
 
-	stage.append(closeBtn, header, stageMain, footer);
+	stage.append(closeBtn, header, stageMain, versionStrip, footer);
 	backdrop.appendChild(stage);
 	document.body.appendChild(backdrop);
+
+	// versionIdx 0 = current (snap.image / capturedAt)
+	// versionIdx 1..N = past captures from snap.versions[i-1]
+	let versionIdx = 0;
+
+	/**
+	 * Reads the currently-displayed image + capturedAt from the active
+	 * sibling at the active version index. Centralizes the "what is shown
+	 * right now" logic so the bezel + inspector + counter agree.
+	 */
+	const activeVersion = (): { imagePath: string; capturedAt: string; navStack?: string[] } => {
+		const cur = siblings[idx]!;
+		if (versionIdx === 0) {
+			return {
+				imagePath: cur.imagePath,
+				capturedAt: cur.capturedAt,
+				navStack: cur.navStack,
+			};
+		}
+		const v = cur.versions?.[versionIdx - 1];
+		if (!v) {
+			return {
+				imagePath: cur.imagePath,
+				capturedAt: cur.capturedAt,
+				navStack: cur.navStack,
+			};
+		}
+		return v;
+	};
+
+	const renderVersionStrip = (): void => {
+		const cur = siblings[idx]!;
+		const total = (cur.versions?.length ?? 0) + 1;
+		versionStrip.replaceChildren();
+		if (total <= 1) {
+			versionStrip.style.display = "none";
+			return;
+		}
+		versionStrip.style.display = "";
+		// Chips ordered oldest → newest, left to right. Latest sits on the
+		// right and is selected by default (versionIdx 0 = right-most).
+		for (let i = total - 1; i >= 0; i--) {
+			const isLatest = i === 0;
+			const chip = ce("button", "rn-lightbox-version-chip");
+			chip.type = "button";
+			chip.dataset.active = String(versionIdx === i);
+			const v =
+				i === 0
+					? { imagePath: cur.imagePath, capturedAt: cur.capturedAt }
+					: cur.versions?.[i - 1];
+			if (!v) continue;
+			const thumb = ce("img", "rn-lightbox-version-thumb");
+			thumb.src = toFileUrl(v.imagePath);
+			thumb.alt = "";
+			thumb.loading = "lazy";
+			const label = ce("span", "rn-lightbox-version-label");
+			label.textContent = isLatest ? "Latest" : `v${total - i}`;
+			const time = ce("span", "rn-lightbox-version-time");
+			time.textContent = new Date(v.capturedAt).toLocaleString();
+			chip.append(thumb, label, time);
+			chip.addEventListener("click", () => {
+				versionIdx = i;
+				update();
+			});
+			versionStrip.appendChild(chip);
+		}
+	};
 
 	const update = (): void => {
 		const cur = siblings[idx];
 		if (!cur) return;
-		img.src = toFileUrl(cur.imagePath);
+		// Clamp versionIdx in case sibling change reduced version count.
+		const versionTotal = (cur.versions?.length ?? 0) + 1;
+		if (versionIdx >= versionTotal) versionIdx = 0;
+
+		const v = activeVersion();
+		img.src = toFileUrl(v.imagePath);
 		title.textContent = cur.route || "/";
-		sub.textContent = `#${String(cur.sequence).padStart(2, "0")} · ${new Date(cur.capturedAt).toLocaleString()}`;
+		const versionTag =
+			versionIdx === 0
+				? versionTotal > 1
+					? ` · latest of ${versionTotal}`
+					: ""
+				: ` · v${versionTotal - versionIdx} of ${versionTotal}`;
+		sub.textContent = `#${String(cur.sequence).padStart(2, "0")} · ${new Date(v.capturedAt).toLocaleString()}${versionTag}`;
 		counter.textContent = `${idx + 1} / ${siblings.length}`;
 		prevBtn.disabled = idx === 0;
 		nextBtn.disabled = idx >= siblings.length - 1;
 
 		inspRoute.textContent = cur.route || "/";
 		inspPos.textContent = `${idx + 1} of ${siblings.length}`;
-		inspCap.textContent = new Date(cur.capturedAt).toLocaleString();
+		inspCap.textContent = new Date(v.capturedAt).toLocaleString();
 		inspState.textContent = cur.stateHash || "—";
 		inspUpload.replaceChildren();
 		const dot = ce("span", "rn-insp-dot");
@@ -4595,6 +4514,8 @@ function openSnapLightbox(
 			text.textContent = `Failed — ${cur.uploaded.error}`;
 		}
 		inspUpload.append(dot, text);
+
+		renderVersionStrip();
 	};
 	update();
 
@@ -4605,22 +4526,40 @@ function openSnapLightbox(
 		} else if (ev.key === "ArrowLeft" && idx > 0) {
 			ev.preventDefault();
 			idx -= 1;
+			versionIdx = 0;
 			update();
 		} else if (ev.key === "ArrowRight" && idx < siblings.length - 1) {
 			ev.preventDefault();
 			idx += 1;
+			versionIdx = 0;
 			update();
+		} else if (ev.key === "ArrowDown") {
+			const cur = siblings[idx];
+			const total = (cur?.versions?.length ?? 0) + 1;
+			if (total > 1 && versionIdx < total - 1) {
+				ev.preventDefault();
+				versionIdx += 1;
+				update();
+			}
+		} else if (ev.key === "ArrowUp") {
+			if (versionIdx > 0) {
+				ev.preventDefault();
+				versionIdx -= 1;
+				update();
+			}
 		}
 	};
 	prevBtn.addEventListener("click", () => {
 		if (idx > 0) {
 			idx -= 1;
+			versionIdx = 0;
 			update();
 		}
 	});
 	nextBtn.addEventListener("click", () => {
 		if (idx < siblings.length - 1) {
 			idx += 1;
+			versionIdx = 0;
 			update();
 		}
 	});

@@ -29,6 +29,18 @@
         aria-label="Search"
       />
     </div>
+    <div class="gtb-context" id="gtb-context" role="status" aria-live="polite">
+      <div class="gtb-context-name" id="gtb-context-name"></div>
+      <button
+        type="button"
+        class="gtb-context-pill"
+        id="gtb-context-pill"
+        aria-label="snap-bridge connection status"
+      >
+        <span class="dot warn" id="gtb-context-dot" aria-hidden="true"></span>
+        <span class="gtb-context-pill-label" id="gtb-context-pill-label">Waiting…</span>
+      </button>
+    </div>
     <div class="gtb-actions" id="gtb-actions"><!-- JS populates --></div>
   </nav>
   <div id="app"></div>
