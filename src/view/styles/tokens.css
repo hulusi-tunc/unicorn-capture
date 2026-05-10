@@ -32,6 +32,7 @@
 	--accent: oklch(0.5 0.22 254);
 	--accent-2: oklch(0.42 0.22 254);
 	--accent-bg: oklch(0.95 0.04 254);
+	--accent-subtle: oklch(0.5 0.22 254 / 0.18); /* glow / drop halo */
 
 	/* State */
 	--ok: oklch(0.58 0.15 155);
@@ -91,6 +92,7 @@
 	--accent: oklch(0.6 0.21 254);
 	--accent-2: oklch(0.66 0.2 254);
 	--accent-bg: oklch(0.24 0.06 254);
+	--accent-subtle: oklch(0.6 0.21 254 / 0.28);
 
 	--ok: oklch(0.72 0.16 155);
 	--warn: oklch(0.78 0.15 80);
@@ -124,6 +126,7 @@
 		--accent: oklch(0.6 0.21 254);
 		--accent-2: oklch(0.66 0.2 254);
 		--accent-bg: oklch(0.24 0.06 254);
+		--accent-subtle: oklch(0.6 0.21 254 / 0.28);
 
 		--ok: oklch(0.72 0.16 155);
 		--warn: oklch(0.78 0.15 80);

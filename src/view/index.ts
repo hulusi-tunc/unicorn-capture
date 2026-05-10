@@ -2089,12 +2089,6 @@ gtbBackBtn.title = "Back to dashboard";
 setBtnIcon(gtbBackBtn, "arrow-left", "Back");
 gtbBackBtn.addEventListener("click", () => leaveProject());
 
-const gtbNewSessionBtn = document.createElement("button");
-gtbNewSessionBtn.className = "btn btn-ghost btn-sm mode-mobile";
-gtbNewSessionBtn.title = "Start a new session";
-setBtnIcon(gtbNewSessionBtn, "rotate-ccw", "New session");
-gtbNewSessionBtn.addEventListener("click", () => void doResetSession());
-
 const gtbPushBtn = document.createElement("button");
 gtbPushBtn.className = "btn btn-secondary mode-project";
 gtbPushBtn.title = "Upload pending snaps to the gallery platform";
@@ -2126,7 +2120,6 @@ gtbActions.append(
 	gtbBackBtn,
 	gtbAddBtn,
 	gtbThemeBtn,
-	gtbNewSessionBtn,
 	gtbPushBtn,
 	gtbSnapGroup,
 );
@@ -2220,7 +2213,6 @@ state.subscribe((s) => {
 	gtbSnapCaret.disabled = r.clientCount === 0 || r.busy;
 	gtbSnapBtn.classList.toggle("is-busy", r.busy);
 	setBtnIcon(gtbSnapBtn, r.busy ? "loader" : "camera", r.busy ? "Capturing…" : "Snap");
-	gtbNewSessionBtn.disabled = r.snaps.length === 0 || r.busy;
 	const projectName =
 		(slug && r.registry.find((p) => p.slug === slug)?.name) || slug;
 
@@ -2601,6 +2593,17 @@ function renderDashboardCards(refs: DashRefs): void {
 		// Refresh re-runs snap-flows-scan; remove drops the project from
 		// Capture's local registry (doesn't touch the customer repo).
 		const actions = ce("div", "dash-card-actions");
+		const doctorBtn = ce("button", "dash-card-action");
+		doctorBtn.type = "button";
+		doctorBtn.title = "Run Doctor — per-project health check (bridge, version pin, layout wiring, …)";
+		doctorBtn.setAttribute("aria-label", `Run Doctor for ${p.slug}`);
+		doctorBtn.appendChild(icon("activity", { size: 14 }));
+		doctorBtn.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			ev.preventDefault();
+			void openDoctorPanel(p.slug, p.name);
+		});
+
 		const refreshBtn = ce("button", "dash-card-action");
 		refreshBtn.type = "button";
 		refreshBtn.title =
@@ -2625,7 +2628,7 @@ function renderDashboardCards(refs: DashRefs): void {
 			void doRemoveProject(p.slug, p.name);
 		});
 
-		actions.append(refreshBtn, removeBtn);
+		actions.append(doctorBtn, refreshBtn, removeBtn);
 
 		card.append(top, nameEl, slugEl, actions);
 		card.addEventListener("click", () => enterProject(p.slug));
@@ -2947,13 +2950,16 @@ function buildWebLayout(): WebRefs {
 	const paneLibrary = ce("div", "web-pane web-pane-library");
 	const libraryEmpty = ce("div", "web-library-empty");
 	const libIcon = ce("div", "web-library-empty-icon");
-	libIcon.appendChild(icon("image", { size: 28, strokeWidth: 1.5 }));
+	libIcon.appendChild(icon("image", { size: 32, strokeWidth: 1.5 }));
 	const libTitle = ce("div", "web-library-empty-title");
-	libTitle.textContent = "No snaps yet";
+	libTitle.textContent = "Your snap library is empty";
 	const libHint = ce("div", "web-library-empty-hint");
 	libHint.textContent =
-		"Switch to Live, load a URL and snap to start building your library.";
-	libraryEmpty.append(libIcon, libTitle, libHint);
+		"Load a URL in the Live tab and capture a frame — it'll land here grouped by flow.";
+	const libCta = ce("button", "btn btn-secondary btn-sm web-library-empty-cta");
+	libCta.type = "button";
+	libCta.append(icon("play", { size: 14 }), document.createTextNode("Open Live"));
+	libraryEmpty.append(libIcon, libTitle, libHint, libCta);
 	const libraryGrid = ce("div", "web-library-grid");
 	libraryGrid.appendChild(libraryEmpty);
 	paneLibrary.appendChild(libraryGrid);
@@ -3021,6 +3027,7 @@ function buildWebLayout(): WebRefs {
 	};
 	tabLive.addEventListener("click", () => setTab("live"));
 	tabLibrary.addEventListener("click", () => setTab("library"));
+	libCta.addEventListener("click", () => setTab("live"));
 	// Initialize active state classes (mirror is-active to legacy `active` for tab styling parity).
 	tabLive.classList.add("active");
 
@@ -3873,6 +3880,165 @@ function showRefreshModePicker(
 }
 
 /**
+ * Doctor panel — per-project health audit modal. Lists the checks
+ * returned by `runDoctor` with status icons, a detail line per check,
+ * and a Fix button when an auto-action is available.
+ *
+ * Opening: from the dashboard card's stethoscope button. Doctor RPC
+ * fires immediately so the user sees status by the time the modal is
+ * fully rendered.
+ *
+ * Auto-fix: each Fix button calls `req.doctorAutoFix({slug, kind})`.
+ * On success we re-run the audit so the row's status flips to "ok".
+ */
+async function openDoctorPanel(slug: string, name?: string): Promise<void> {
+	const backdrop = document.createElement("div");
+	backdrop.className = "rn-confirm-backdrop";
+	const dlg = document.createElement("div");
+	dlg.className = "rn-confirm-dialog rn-doctor-dialog";
+
+	const title = document.createElement("h3");
+	title.className = "rn-confirm-title";
+	title.textContent = `Doctor — ${name || slug}`;
+	const sub = document.createElement("p");
+	sub.className = "rn-confirm-body";
+	sub.textContent = "Per-project health check. Findings + auto-fixes.";
+
+	const list = ce("ul", "rn-doctor-checks");
+	const summary = ce("div", "rn-doctor-summary");
+	summary.textContent = "Running…";
+
+	const actions = document.createElement("div");
+	actions.className = "rn-confirm-actions";
+	const closeBtn = document.createElement("button");
+	closeBtn.className = "btn btn-primary";
+	closeBtn.textContent = "Close";
+	const refreshBtn = document.createElement("button");
+	refreshBtn.className = "btn btn-ghost";
+	refreshBtn.textContent = "Re-run";
+	actions.append(refreshBtn, closeBtn);
+
+	dlg.append(title, sub, summary, list, actions);
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = () => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent) => {
+		if (e.key === "Escape") close();
+	};
+	closeBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+	refreshBtn.addEventListener("click", () => void runAudit());
+
+	const runAudit = async (): Promise<void> => {
+		summary.textContent = "Running…";
+		list.replaceChildren();
+		try {
+			const r = (await req.runDoctor({ slug })) as
+				| {
+						ok: true;
+						report: {
+							checks: Array<{
+								id: string;
+								label: string;
+								status: "ok" | "warn" | "error";
+								detail: string;
+								fixAction?: {
+									kind:
+										| "bump-snap-bridge"
+										| "regenerate-flows"
+										| "merge-flows"
+										| "install-view-shot"
+										| "open-layout"
+										| "manual";
+									label: string;
+									target?: string;
+								};
+							}>;
+							summary: { ok: number; warn: number; error: number };
+						};
+				  }
+				| { ok: false; error: string };
+			if (!r.ok) {
+				summary.textContent = `Audit failed: ${r.error}`;
+				return;
+			}
+			const s = r.report.summary;
+			summary.textContent = `${s.ok} ok · ${s.warn} warn · ${s.error} error`;
+			summary.dataset.severity =
+				s.error > 0 ? "error" : s.warn > 0 ? "warn" : "ok";
+			for (const c of r.report.checks) {
+				const li = ce("li", `rn-doctor-check rn-doctor-check-${c.status}`);
+				const head = ce("div", "rn-doctor-check-head");
+				const dot = ce("span", `rn-doctor-check-dot ${c.status}`);
+				const lbl = ce("span", "rn-doctor-check-label");
+				lbl.textContent = c.label;
+				head.append(dot, lbl);
+				const det = ce("p", "rn-doctor-check-detail");
+				det.textContent = c.detail;
+				li.append(head, det);
+				if (c.fixAction) {
+					const fix = ce("button", "rn-doctor-check-fix");
+					fix.type = "button";
+					fix.textContent = c.fixAction.label;
+					fix.addEventListener("click", () =>
+						void runFix(c.fixAction!.kind, c.fixAction!.target, fix),
+					);
+					li.appendChild(fix);
+				}
+				list.appendChild(li);
+			}
+		} catch (err) {
+			summary.textContent = `Audit error: ${(err as Error).message}`;
+		}
+	};
+
+	const runFix = async (
+		kind:
+			| "bump-snap-bridge"
+			| "regenerate-flows"
+			| "merge-flows"
+			| "install-view-shot"
+			| "open-layout"
+			| "manual",
+		target: string | undefined,
+		btn: HTMLButtonElement,
+	): Promise<void> => {
+		if (kind === "open-layout" && target) {
+			log(`Layout file at ${target} — open it in your editor to fix manually.`, "info");
+			return;
+		}
+		if (kind === "manual") return;
+		btn.disabled = true;
+		btn.textContent = "Working…";
+		try {
+			const r = (await req.doctorAutoFix({ slug, kind })) as
+				| { ok: true; output: string }
+				| { ok: false; error: string };
+			if (!r.ok) {
+				log(`Fix failed: ${r.error}`, "error");
+				btn.textContent = "Failed — retry";
+				btn.disabled = false;
+				return;
+			}
+			log(`✓ Fix "${kind}" applied`, "success");
+			void runAudit();
+		} catch (err) {
+			log(`Fix crashed: ${(err as Error).message}`, "error");
+			btn.disabled = false;
+		}
+	};
+
+	void runAudit();
+}
+
+/**
  * Push dialog with an optional commit-message-style note. Resolves with
  * the trimmed message string if the user pushes, or null if they cancel.
  */
@@ -3943,20 +4109,6 @@ function showPushDialog(opts: {
 		document.addEventListener("keydown", onKey);
 		queueMicrotask(() => ta.focus());
 	});
-}
-
-async function doResetSession(): Promise<void> {
-	try {
-		await req.resetSnapSession({});
-		state.set((cur) => ({
-			...cur,
-			rn: { ...cur.rn, snaps: [], selectedIdx: -1 },
-		}));
-		rnSelectedSeq = null;
-		log("Snap session reset", "info");
-	} catch (err) {
-		log(`Reset failed: ${(err as Error).message}`, "error");
-	}
 }
 
 async function refreshProjectRegistry(): Promise<void> {
@@ -4041,7 +4193,13 @@ function applyRnState(s: AppState): void {
 
 	if (totalFrames === 0 && visibleGroups.length === 0) {
 		const empty = ce("div", "rn-grid-empty");
-		empty.textContent = UI.rn.snap.emptyHint;
+		const emptyIcon = ce("div", "rn-grid-empty-icon");
+		emptyIcon.appendChild(icon("smartphone", { size: 32, strokeWidth: 1.5 }));
+		const emptyTitle = ce("div", "rn-grid-empty-title");
+		emptyTitle.textContent = "No snaps in this project yet";
+		const emptyHint = ce("div", "rn-grid-empty-hint");
+		emptyHint.textContent = UI.rn.snap.emptyHint;
+		empty.append(emptyIcon, emptyTitle, emptyHint);
 		refs.previewBox.appendChild(empty);
 		return;
 	}
@@ -4400,7 +4558,7 @@ function applyRnState(s: AppState): void {
 
 			if (idx < group.snaps.length - 1) {
 				const chev = ce("span", "rn-chevron");
-				chev.textContent = "›";
+				chev.appendChild(icon("chevron-right", { size: 18, strokeWidth: 1.5 }));
 				chev.setAttribute("aria-hidden", "true");
 				li.appendChild(chev);
 			}

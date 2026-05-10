@@ -26,6 +26,7 @@ import {
 import { assembleCoreSteps } from "./installer-steps";
 import { fingerprintRepo } from "./repo-fingerprint";
 import { buildImprovePrompt } from "./snap-flows-improver";
+import { runDoctor } from "./doctor";
 import { buildVerifyStep } from "./verifier";
 import { captureRect } from "./screencapture";
 import { forwardTap, mirrorSimulator } from "./simulator";
@@ -190,6 +191,63 @@ async function runWrapScreenForProject(
 		});
 		child.on("error", (err: Error) => {
 			resolve({ ok: false, error: `Failed to spawn ${cmd}: ${err.message}` });
+		});
+		child.on("close", (code: number | null) => {
+			if (code !== 0) {
+				resolve({
+					ok: false,
+					error: (stderr || stdout || `Exited with code ${code}`).trim(),
+				});
+				return;
+			}
+			resolve({ ok: true, output: stdout.trim() });
+		});
+	});
+}
+
+/**
+ * Run an npm/pnpm/yarn install (or arbitrary command) in the customer
+ * repo's package-manager root. Used by Doctor's auto-fix actions to
+ * bump snap-bridge, install react-native-view-shot, etc. without
+ * dropping the designer into a terminal.
+ *
+ * Picks `pm` from .unicorn/project.json fingerprint when present;
+ * otherwise falls back to `npm` (works for npm/pnpm/yarn lockfiles
+ * since `npm install` isn't strictly the right tool but the existing
+ * lockfile usually catches the lookup).
+ */
+async function runPmCommand(
+	project: CaptureProjectEntry,
+	args: string[],
+): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
+	const pmRoot = project.repoPath && existsSync(project.repoPath)
+		? project.repoPath
+		: project.rnAppDir;
+	if (!pmRoot) {
+		return { ok: false, error: `No package manager root for "${project.slug}"` };
+	}
+	// Pick package manager from lockfile presence — quick + correct enough
+	// for the common cases. `bun` projects keep bun.lock, pnpm has
+	// pnpm-lock.yaml, yarn has yarn.lock; default to npm.
+	const pm = existsSync(join(pmRoot, "bun.lock"))
+		? "bun"
+		: existsSync(join(pmRoot, "pnpm-lock.yaml"))
+			? "pnpm"
+			: existsSync(join(pmRoot, "yarn.lock"))
+				? "yarn"
+				: "npm";
+	return new Promise((resolve) => {
+		const child = spawn(pm, args, { cwd: pmRoot, env: process.env });
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (d: Buffer) => {
+			stdout += d.toString();
+		});
+		child.stderr.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+		child.on("error", (err: Error) => {
+			resolve({ ok: false, error: `Failed to spawn ${pm}: ${err.message}` });
 		});
 		child.on("close", (code: number | null) => {
 			if (code !== 0) {
@@ -827,6 +885,41 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 			},
 			wrapScreenForFullPage: async ({ slug, route, mode }) => {
 				return runWrapScreenForProject(slug, route, mode);
+			},
+			runDoctor: async ({ slug }) => {
+				const bridgeConnected = snapServer
+					.clients()
+					.some((c) => c.projectId === slug);
+				const r = runDoctor(slug, bridgeConnected);
+				return r;
+			},
+			doctorAutoFix: async ({ slug, kind }) => {
+				const project = findProjectForBridge(slug);
+				if (!project) return { ok: false, error: `No project with slug "${slug}"` };
+				const rnAppDir = project.rnAppDir;
+				if (!rnAppDir || !existsSync(rnAppDir)) {
+					return {
+						ok: false,
+						error: `RN app dir doesn't exist on disk: ${rnAppDir ?? "<unset>"}`,
+					};
+				}
+				if (kind === "regenerate-flows") {
+					const r = await runSnapFlowsScanForProject(slug, "regenerate");
+					if (r.ok) return { ok: true, output: r.output };
+					return { ok: false, error: r.error };
+				}
+				if (kind === "merge-flows") {
+					const r = await runSnapFlowsScanForProject(slug, "merge");
+					if (r.ok) return { ok: true, output: r.output };
+					return { ok: false, error: r.error };
+				}
+				if (kind === "bump-snap-bridge") {
+					return runPmCommand(project, ["install", "--save-dev", `github:hulusi-tunc/snap-bridge#v0.7.0`]);
+				}
+				if (kind === "install-view-shot") {
+					return runPmCommand(project, ["install", "--save-dev", "react-native-view-shot"]);
+				}
+				return { ok: false, error: `Unknown fix: ${kind}` };
 			},
 			initProject: async (input) => {
 				const result = await initProject(input);

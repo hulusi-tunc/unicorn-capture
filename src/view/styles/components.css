@@ -489,8 +489,13 @@ body:not([data-mode="dashboard"]) .mode-dashboard { display: none; }
 body:not([data-mode="mobile"]):not([data-mode="web"]) .mode-project { display: none; }
 body:not([data-mode="mobile"]) .mode-mobile { display: none; }
 body:not([data-mode="web"]) .mode-web { display: none; }
-/* Hide search on project pages */
-body:not([data-mode="dashboard"]) .gtb-search { display: none; }
+/* Hide search + brand on project pages — the project name in .gtb-context
+   is the only identity we need, and it frees space for the action row. */
+body:not([data-mode="dashboard"]) .gtb-search,
+body:not([data-mode="dashboard"]) .gtb-brand { display: none; }
+/* When the brand is hidden, let the context block claim the left column
+   so it sits flush instead of floating in the centre. */
+body:not([data-mode="dashboard"]) .gtb-context { justify-self: start; }
 
 /* "or" divider between URL input and the dropzone in the merged Web mode. */
 .src-divider {
@@ -1797,38 +1802,48 @@ kbd {
 }
 .web-library-empty {
 	margin: auto;
-	max-width: 360px;
+	max-width: 380px;
 	text-align: center;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	gap: 10px;
-	padding: 32px 20px;
+	gap: 14px;
+	padding: 40px 28px;
 	border: 1px dashed var(--border);
-	border-radius: 12px;
-	background: var(--bg-1);
+	border-radius: var(--radius-xl);
+	background:
+		radial-gradient(120% 80% at 50% 0%, var(--accent-bg) 0%, transparent 60%),
+		var(--bg-1);
 }
 .web-library-empty-icon {
-	color: var(--fg-3);
+	color: var(--accent);
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 56px;
-	height: 56px;
+	width: 64px;
+	height: 64px;
 	border-radius: 999px;
 	background: var(--bg-0);
 	border: 1px solid var(--border);
+	box-shadow: var(--shadow-sm);
+	margin-bottom: 2px;
 }
 .web-library-empty-title {
 	font-family: var(--font);
-	font-size: 14px;
+	font-size: 15px;
 	font-weight: 600;
+	letter-spacing: -0.005em;
 	color: var(--fg-0);
 }
 .web-library-empty-hint {
 	font-size: 12px;
 	color: var(--fg-2);
-	line-height: 1.5;
+	line-height: 1.55;
+	max-width: 30ch;
+}
+.web-library-empty-cta {
+	margin-top: 4px;
+	gap: 6px;
 }
 
 .rn-layout {
@@ -2835,13 +2850,39 @@ kbd {
 }
 .rn-grid-empty {
 	display: flex;
+	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	height: 100%;
-	color: var(--fg-3);
-	font-size: 13px;
+	gap: 14px;
+	min-height: 60vh;
+	padding: 48px 32px;
 	text-align: center;
-	padding: var(--space-5);
+}
+.rn-grid-empty-icon {
+	color: var(--accent);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 64px;
+	height: 64px;
+	border-radius: 999px;
+	background: var(--bg-0);
+	border: 1px solid var(--border);
+	box-shadow: var(--shadow-sm);
+	margin-bottom: 2px;
+}
+.rn-grid-empty-title {
+	font-family: var(--font);
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: -0.005em;
+	color: var(--fg-0);
+}
+.rn-grid-empty-hint {
+	font-size: 12px;
+	color: var(--fg-2);
+	line-height: 1.55;
+	max-width: 36ch;
 }
 
 /* Overview header — mirrors gallery's "All flows" page heading. */
@@ -3083,9 +3124,10 @@ kbd {
 }
 .rn-placeholder-hint {
 	color: var(--fg-3);
-	font-family: var(--font);
-	font-size: 11px;
-	letter-spacing: 0.04em;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.12em;
 	text-transform: uppercase;
 	user-select: none;
 }
@@ -3192,11 +3234,16 @@ kbd {
 	transition: transform 120ms ease-out, opacity 120ms ease-out;
 }
 .rn-chevron {
-	font-size: 22px;
-	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 	color: var(--fg-3);
 	flex-shrink: 0;
 	user-select: none;
+	opacity: 0.7;
+}
+.rn-chevron .ic {
+	display: block;
 }
 
 /* Card — bezel + step badge + small label below. */
@@ -3338,15 +3385,18 @@ kbd {
 	display: inline-flex;
 	align-items: center;
 	height: 20px;
-	padding: 0 8px;
+	padding: 0 9px;
 	border-radius: 999px;
 	background: var(--accent);
 	color: #fff;
 	font-family: var(--font);
 	font-size: 10px;
 	font-weight: 600;
-	letter-spacing: 0.04em;
-	box-shadow: 0 4px 10px -3px oklch(0 0 0 / 0.35);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	box-shadow:
+		var(--shadow-md),
+		0 0 0 3px var(--accent-subtle);
 	pointer-events: none;
 	transition:
 		opacity 180ms var(--ease),
@@ -3631,6 +3681,98 @@ kbd {
 .rn-confirm-danger:hover:not(:disabled) {
 	opacity: 0.9;
 	background: oklch(0.58 0.20 25);
+}
+
+/* Doctor panel — health checklist modal */
+.rn-doctor-dialog {
+	min-width: 480px;
+	max-width: 640px;
+}
+.rn-doctor-summary {
+	font-family: var(--font-mono, "Space Mono", monospace);
+	font-size: 11px;
+	color: var(--fg-2);
+	padding: 6px 10px;
+	border-radius: 6px;
+	background: var(--bg-1);
+	display: inline-block;
+	margin: 4px 0 8px;
+}
+.rn-doctor-summary[data-severity="warn"] {
+	background: oklch(0.93 0.06 80);
+	color: oklch(0.4 0.13 80);
+}
+.rn-doctor-summary[data-severity="error"] {
+	background: oklch(0.93 0.06 25);
+	color: oklch(0.45 0.18 25);
+}
+.rn-doctor-checks {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-height: 50vh;
+	overflow-y: auto;
+}
+.rn-doctor-check {
+	padding: 10px 12px;
+	border-radius: 8px;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.rn-doctor-check-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.rn-doctor-check-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 999px;
+	flex-shrink: 0;
+	background: var(--fg-3);
+}
+.rn-doctor-check-dot.ok { background: oklch(0.65 0.15 145); }
+.rn-doctor-check-dot.warn { background: oklch(0.75 0.15 80); }
+.rn-doctor-check-dot.error { background: oklch(0.62 0.19 25); }
+.rn-doctor-check-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--fg-0);
+}
+.rn-doctor-check-detail {
+	margin: 0;
+	font-size: 11px;
+	color: var(--fg-2);
+	line-height: 1.5;
+	padding-left: 16px;
+}
+.rn-doctor-check-fix {
+	all: unset;
+	cursor: pointer;
+	margin-top: 6px;
+	margin-left: 16px;
+	align-self: flex-start;
+	padding: 4px 10px;
+	border-radius: 6px;
+	background: var(--accent);
+	color: #fff;
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.02em;
+	transition: opacity 120ms var(--ease);
+}
+.rn-doctor-check-fix:hover:not(:disabled) {
+	opacity: 0.9;
+}
+.rn-doctor-check-fix:disabled {
+	opacity: 0.5;
+	cursor: wait;
 }
 
 /* Refresh two-mode picker — wider dialog, two big option cards stacked */
@@ -3936,7 +4078,8 @@ kbd {
 .rn-card-name {
 	margin: 0;
 	font-size: 12px;
-	font-weight: 500;
+	font-weight: 600;
+	letter-spacing: -0.005em;
 	color: var(--fg-0);
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -3947,6 +4090,7 @@ kbd {
 	font-family: var(--font-mono);
 	font-size: 10px;
 	color: var(--fg-3);
+	font-variant-numeric: tabular-nums;
 }
 
 /* ════════════════════════════════════════════════════════════════════════

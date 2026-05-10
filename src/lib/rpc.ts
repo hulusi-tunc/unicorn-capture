@@ -462,6 +462,51 @@ export type ScenarioRunnerRPC = {
 					| { ok: true; output: string }
 					| { ok: false; error: string };
 			};
+			runDoctor: {
+				params: { slug: string };
+				response:
+					| {
+							ok: true;
+							report: {
+								slug: string;
+								repoPath: string;
+								rnAppDir: string | null;
+								bridgeConnected: boolean;
+								snapBridgePinned: string | null;
+								snapBridgeSuggested: string;
+								checks: Array<{
+									id: string;
+									label: string;
+									status: "ok" | "warn" | "error";
+									detail: string;
+									fixAction?: {
+										kind:
+											| "bump-snap-bridge"
+											| "regenerate-flows"
+											| "merge-flows"
+											| "install-view-shot"
+											| "open-layout"
+											| "manual";
+										label: string;
+										target?: string;
+									};
+								}>;
+								summary: { ok: number; warn: number; error: number };
+							};
+					  }
+					| { ok: false; error: string };
+			};
+			doctorAutoFix: {
+				params: {
+					slug: string;
+					kind:
+						| "bump-snap-bridge"
+						| "regenerate-flows"
+						| "merge-flows"
+						| "install-view-shot";
+				};
+				response: { ok: true; output: string } | { ok: false; error: string };
+			};
 			initProject: {
 				params: {
 					repoPath: string;

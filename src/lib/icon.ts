@@ -3,6 +3,7 @@
 // (lucide-react), so visual parity is automatic.
 
 import {
+	Activity,
 	ArrowLeft,
 	Camera,
 	ChevronDown,
@@ -36,6 +37,7 @@ import {
 
 // Allow-list of icons we actually use. Add new ones here as needed.
 export const ICONS = {
+	activity: Activity,
 	"arrow-left": ArrowLeft,
 	camera: Camera,
 	"chevron-down": ChevronDown,
