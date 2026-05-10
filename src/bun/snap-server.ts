@@ -243,6 +243,15 @@ export function startSnapServer(
 				if (!msg || typeof msg !== "object") return;
 				const m = msg as Record<string, unknown>;
 
+				if (m.kind === "heartbeat") {
+					// Bridge ping — reply immediately so its watch timer
+					// stamps lastAck and keeps the socket alive.
+					try {
+						ws.send(JSON.stringify({ cmd: "heartbeat-ack", ts: Date.now() }));
+					} catch {}
+					return;
+				}
+
 				if (m.kind === "hello" && typeof m.projectId === "string") {
 					ws.data.projectId = m.projectId;
 					const declared = parseDeclaredFlows(m.flows);

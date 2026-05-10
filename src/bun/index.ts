@@ -168,7 +168,7 @@ async function runWrapScreenForProject(
 	const cmd = localBin ?? "npx";
 	const baseArgs = localBin
 		? []
-		: ["-y", "github:hulusi-tunc/snap-bridge#v0.6.1", "snap-bridge-wrap-screen"];
+		: ["-y", "github:hulusi-tunc/snap-bridge#v0.7.0", "snap-bridge-wrap-screen"];
 	const cliArgs: string[] = [];
 	if (mode === "list") cliArgs.push("--list");
 	else cliArgs.push(route);
@@ -239,7 +239,7 @@ async function runSnapFlowsScanForProject(
 	const cmd = localBin ?? "npx";
 	const baseArgs = localBin
 		? []
-		: ["-y", "github:hulusi-tunc/snap-bridge#v0.6.1", "snap-flows-scan"];
+		: ["-y", "github:hulusi-tunc/snap-bridge#v0.7.0", "snap-flows-scan"];
 	const args = mode === "merge" ? [...baseArgs, "--merge"] : baseArgs;
 
 	return new Promise((resolve) => {
