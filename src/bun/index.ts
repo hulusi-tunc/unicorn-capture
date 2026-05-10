@@ -465,7 +465,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					flows: orch.listFlows(),
 				};
 			},
-			performSnap: async ({ projectSlug }) => {
+			performSnap: async ({ projectSlug, mode }) => {
 				const orch = await ensureOrchestrator();
 				if (snapServer.clientCount() === 0) {
 					return {
@@ -476,13 +476,19 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				}
 				// `projectSlug` pins the request to the bridge of the project
 				// currently selected in the sidebar — necessary when multiple
-				// RN apps are running at once (folleli + ovria).
-				const r = await orch.snap({ projectId: projectSlug });
+				// RN apps are running at once (folleli + ovria). `mode` chooses
+				// between replace-existing-slot ("auto") and force-new-card
+				// ("variant"); see RPC type for details.
+				const r = await orch.snap({
+					projectId: projectSlug,
+					mode: mode ?? "auto",
+				});
 				if (!r.ok) return { ok: false, error: r.error };
 				// Manual upload only — the user pushes when they're ready.
 				return {
 					ok: true,
 					snap: snapToInfo(r.record, orch.outDir),
+					recordKind: r.recordKind,
 					captureMethod: r.captureMethod,
 					captureNote: r.captureNote,
 				};
@@ -527,6 +533,21 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					};
 				}
 				return { ok: true };
+			},
+			deleteSnapVersion: async ({ sessionId, sequence, versionIdx }) => {
+				const orch = await ensureOrchestrator();
+				const outcome = await orch.deleteSnapVersion(
+					sessionId,
+					sequence,
+					versionIdx,
+				);
+				if (outcome === false) {
+					return {
+						ok: false,
+						error: `No snap with sessionId=${sessionId} sequence=${sequence} versionIdx=${versionIdx}`,
+					};
+				}
+				return { ok: true, outcome };
 			},
 			pushAll: async ({ projectSlug, message }) => {
 				const orch = await ensureOrchestrator();

@@ -292,11 +292,24 @@ export type ScenarioRunnerRPC = {
 				};
 			};
 			performSnap: {
-				params: { projectSlug?: string };
+				params: {
+					projectSlug?: string;
+					/**
+					 * "auto" (default) — same (route, stateHash) slot replaces;
+					 *   prior image goes to versions[]. Right model for redesigning
+					 *   the same screen.
+					 * "variant" — always create a NEW snap record even if a slot
+					 *   match exists. Right model for capturing multiple frames of
+					 *   the same long page (top/middle/bottom) or filter states.
+					 */
+					mode?: "auto" | "variant";
+				};
 				response:
 					| {
 							ok: true;
 							snap: RnSnapInfo;
+							/** "replaced" = same slot updated; "appended" = new card created (variant or first capture). */
+							recordKind?: "replaced" | "appended";
 							/** Which path produced the image: bridge full-page or simctl viewport. */
 							captureMethod?: "full-page" | "simctl";
 							/** Reason the bridge full-page path didn't run, when fallback to simctl happened. */
@@ -324,6 +337,21 @@ export type ScenarioRunnerRPC = {
 			deleteSnap: {
 				params: { sessionId: string; sequence: number };
 				response: { ok: true } | { ok: false; error: string };
+			};
+			deleteSnapVersion: {
+				params: {
+					sessionId: string;
+					sequence: number;
+					/** 0 = current, 1+ = entries from versions[] (newest-first). */
+					versionIdx: number;
+				};
+				response:
+					| {
+							ok: true;
+							/** "deleted" = whole snap gone (last version standing). */
+							outcome: "deleted" | "version-removed" | "promoted";
+					  }
+					| { ok: false; error: string };
 			};
 			reorderSnaps: {
 				params: {

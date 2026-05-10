@@ -2101,10 +2101,26 @@ gtbPushBtn.title = "Upload pending snaps to the gallery platform";
 setBtnIcon(gtbPushBtn, "upload", "Push to web");
 gtbPushBtn.addEventListener("click", () => void doPushPending());
 
+// Split snap button: main button = default snap (auto = replace existing
+// slot), caret = dropdown with "Snap as variant" (force a new card on the
+// same slot, used for long pages or filter-state captures).
+const gtbSnapGroup = document.createElement("div");
+gtbSnapGroup.className = "gtb-snap-group mode-project";
 const gtbSnapBtn = document.createElement("button");
-gtbSnapBtn.className = "btn btn-primary mode-project";
+gtbSnapBtn.className = "btn btn-primary gtb-snap-main";
+gtbSnapBtn.title = "Capture (⌘⇧S)";
 setBtnIcon(gtbSnapBtn, "camera", "Snap");
-gtbSnapBtn.addEventListener("click", () => void doSnap());
+gtbSnapBtn.addEventListener("click", () => void doSnap("auto"));
+const gtbSnapCaret = document.createElement("button");
+gtbSnapCaret.className = "btn btn-primary gtb-snap-caret";
+gtbSnapCaret.title = "Snap options";
+gtbSnapCaret.setAttribute("aria-label", "Snap options");
+gtbSnapCaret.appendChild(icon("chevron-down", { size: 12 }));
+gtbSnapCaret.addEventListener("click", (ev) => {
+	ev.stopPropagation();
+	openSnapMenu(gtbSnapCaret);
+});
+gtbSnapGroup.append(gtbSnapBtn, gtbSnapCaret);
 
 gtbActions.append(
 	gtbBackBtn,
@@ -2112,8 +2128,76 @@ gtbActions.append(
 	gtbThemeBtn,
 	gtbNewSessionBtn,
 	gtbPushBtn,
-	gtbSnapBtn,
+	gtbSnapGroup,
 );
+
+let snapMenuOpen: HTMLDivElement | null = null;
+function closeSnapMenu(): void {
+	if (!snapMenuOpen) return;
+	snapMenuOpen.remove();
+	snapMenuOpen = null;
+	document.removeEventListener("click", onDocClickCloseSnap, true);
+}
+function onDocClickCloseSnap(ev: MouseEvent): void {
+	if (!snapMenuOpen) return;
+	if (snapMenuOpen.contains(ev.target as Node)) return;
+	closeSnapMenu();
+}
+function openSnapMenu(anchor: HTMLElement): void {
+	if (snapMenuOpen) {
+		closeSnapMenu();
+		return;
+	}
+	const rect = anchor.getBoundingClientRect();
+	const menu = ce("div", "gtb-snap-menu");
+	menu.style.top = `${rect.bottom + 6}px`;
+	menu.style.right = `${window.innerWidth - rect.right}px`;
+
+	const mkItem = (
+		title: string,
+		hint: string,
+		shortcut: string,
+		onClick: () => void,
+	): HTMLButtonElement => {
+		const item = ce("button", "gtb-snap-menu-item");
+		item.type = "button";
+		const head = ce("div", "gtb-snap-menu-head");
+		const t = ce("span", "gtb-snap-menu-title");
+		t.textContent = title;
+		const k = ce("span", "gtb-snap-menu-kbd");
+		k.textContent = shortcut;
+		head.append(t, k);
+		const h = ce("p", "gtb-snap-menu-hint");
+		h.textContent = hint;
+		item.append(head, h);
+		item.addEventListener("click", () => {
+			closeSnapMenu();
+			onClick();
+		});
+		return item;
+	};
+
+	menu.appendChild(
+		mkItem(
+			"Snap",
+			"Replace existing capture for this screen. Prior image goes into version history. Right model when redesigning.",
+			"⌘⇧S",
+			() => void doSnap("auto"),
+		),
+	);
+	menu.appendChild(
+		mkItem(
+			"Snap as variant",
+			"Always create a NEW card on the same screen. Use for long pages (top/middle/bottom) or filter / state variants.",
+			"⌘⇧V",
+			() => void doSnap("variant"),
+		),
+	);
+
+	document.body.appendChild(menu);
+	snapMenuOpen = menu;
+	document.addEventListener("click", onDocClickCloseSnap, true);
+}
 
 function syncGlobalTopbar(): void {
 	const slug = state.get().rn.selectedProjectSlug;
@@ -2133,6 +2217,7 @@ state.subscribe((s) => {
 		? r.snaps.filter((n) => n.projectId === slug)
 		: r.snaps;
 	gtbSnapBtn.disabled = r.clientCount === 0 || r.busy;
+	gtbSnapCaret.disabled = r.clientCount === 0 || r.busy;
 	gtbSnapBtn.classList.toggle("is-busy", r.busy);
 	setBtnIcon(gtbSnapBtn, r.busy ? "loader" : "camera", r.busy ? "Capturing…" : "Snap");
 	gtbNewSessionBtn.disabled = r.snaps.length === 0 || r.busy;
@@ -3051,27 +3136,57 @@ function writeLocal(key: string, value: string): void {
 	} catch {}
 }
 
-async function doSnap(): Promise<void> {
+/**
+ * Capture a screen.
+ *   mode === "auto"     → existing slot (route + stateHash) is REPLACED;
+ *                         prior image moves to versions[]. Best for redesign.
+ *   mode === "variant"  → always create a NEW card on the same slot.
+ *                         Best for long pages (top/middle/bottom) + filter
+ *                         states the improver hasn't given a stateHash to.
+ */
+async function doSnap(mode: "auto" | "variant" = "auto"): Promise<void> {
 	if (state.get().rn.busy) return; // double-click guard
 	state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: true } }));
 	try {
 		const r = await req.performSnap({
 			projectSlug: state.get().rn.selectedProjectSlug ?? undefined,
+			mode,
 		});
 		if (!r.ok) {
 			log(r.error, "error");
 			return;
 		}
-		state.set((cur) => ({
-			...cur,
-			rn: {
-				...cur.rn,
-				snaps: [...cur.rn.snaps, r.snap],
-				selectedIdx: cur.rn.snaps.length,
-			},
-		}));
+		// "replaced" snaps preserve (sessionId, sequence) so we update
+		// the existing entry in place; "appended" snaps push fresh.
+		// Without this, the optimistic UI briefly shows a duplicate
+		// before the next status poll reconciles.
+		state.set((cur) => {
+			const idx = cur.rn.snaps.findIndex(
+				(s) =>
+					s.sessionId === r.snap.sessionId &&
+					s.sequence === r.snap.sequence,
+			);
+			const nextSnaps =
+				idx >= 0
+					? cur.rn.snaps.map((s, i) => (i === idx ? r.snap : s))
+					: [...cur.rn.snaps, r.snap];
+			return {
+				...cur,
+				rn: {
+					...cur.rn,
+					snaps: nextSnaps,
+					selectedIdx: idx >= 0 ? idx : cur.rn.snaps.length,
+				},
+			};
+		});
 		rnSelectedSeq = r.snap.sequence;
-		log(`✓ #${r.snap.sequence} ${r.snap.route}`, "success");
+		const verb =
+			r.recordKind === "replaced"
+				? "Updated"
+				: mode === "variant"
+					? "Variant"
+					: "Snapped";
+		log(`✓ ${verb} #${r.snap.sequence} ${r.snap.route}`, "success");
 		// Diagnostic: tell the user which capture path actually produced
 		// the image, so "why is my long page cropped?" debugs itself.
 		if (r.captureMethod === "full-page") {
@@ -3426,6 +3541,69 @@ async function doDeleteSnap(snap: RnSnapInfo): Promise<void> {
 		log(`✗ Deleted #${snap.sequence} ${snap.route}`, "info");
 	} catch (err) {
 		log(`Delete failed: ${(err as Error).message}`, "error");
+	}
+}
+
+/**
+ * Delete a single past version of a snap from inside the lightbox version
+ * scrubber. Confirms before destructive — the latest version's removal
+ * promotes versions[0] to current, the only-version case wipes the snap
+ * entirely, hence the slightly-different copy in each branch.
+ */
+async function doDeleteSnapVersion(
+	snap: RnSnapInfo,
+	versionIdx: number,
+	totalVersions: number,
+): Promise<void> {
+	const isLatest = versionIdx === 0;
+	const isLast = totalVersions <= 1;
+	const versionLabel = isLatest
+		? "latest version"
+		: `v${totalVersions - versionIdx}`;
+	const body = isLast
+		? `This is the only version captured — deleting it removes the entire snap card.`
+		: isLatest
+			? `Removes the current image; the previous capture (v${totalVersions - 1}) becomes the new latest.`
+			: `Removes only this older capture. The latest stays.`;
+	const ok = await showConfirm({
+		title: `Delete ${versionLabel} of ${snap.route || "/"}?`,
+		body,
+		confirmLabel: isLast ? "Delete snap" : "Delete version",
+		danger: true,
+	});
+	if (!ok) return;
+	try {
+		const r = await req.deleteSnapVersion({
+			sessionId: snap.sessionId,
+			sequence: snap.sequence,
+			versionIdx,
+		});
+		if (!r.ok) {
+			log(`Delete version failed: ${r.error}`, "error");
+			return;
+		}
+		// Resync from the server — the manifest now reflects the deletion.
+		try {
+			const status = await req.snapServerStatus({});
+			state.set((cur) => ({
+				...cur,
+				rn: {
+					...cur.rn,
+					snaps: status.snaps,
+					pendingUploads: status.pendingUploads,
+				},
+			}));
+		} catch {}
+		if (r.outcome === "deleted") {
+			log(`✗ Deleted #${snap.sequence} ${snap.route} (last version)`, "info");
+			closeSnapLightbox();
+		} else if (r.outcome === "promoted") {
+			log(`✓ Promoted previous version of ${snap.route}`, "success");
+		} else {
+			log(`✓ Deleted ${versionLabel} of ${snap.route}`, "success");
+		}
+	} catch (err) {
+		log(`Delete version failed: ${(err as Error).message}`, "error");
 	}
 }
 
@@ -4554,8 +4732,7 @@ function openSnapLightbox(
 		// right and is selected by default (versionIdx 0 = right-most).
 		for (let i = total - 1; i >= 0; i--) {
 			const isLatest = i === 0;
-			const chip = ce("button", "rn-lightbox-version-chip");
-			chip.type = "button";
+			const chip = ce("div", "rn-lightbox-version-chip");
 			chip.dataset.active = String(versionIdx === i);
 			const v =
 				i === 0
@@ -4570,7 +4747,23 @@ function openSnapLightbox(
 			label.textContent = isLatest ? "Latest" : `v${total - i}`;
 			const time = ce("span", "rn-lightbox-version-time");
 			time.textContent = new Date(v.capturedAt).toLocaleString();
-			chip.append(thumb, label, time);
+			// × delete button — hover-revealed on each chip. Hooks
+			// deleteSnapVersion which handles the "promote next-most-recent"
+			// logic when the latest is removed.
+			const delBtn = ce("button", "rn-lightbox-version-del");
+			delBtn.type = "button";
+			delBtn.title = "Delete this version";
+			delBtn.setAttribute(
+				"aria-label",
+				isLatest ? "Delete latest version" : `Delete v${total - i}`,
+			);
+			delBtn.textContent = "×";
+			delBtn.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				ev.preventDefault();
+				void doDeleteSnapVersion(cur, i, total);
+			});
+			chip.append(thumb, label, time, delBtn);
 			chip.addEventListener("click", () => {
 				versionIdx = i;
 				update();
@@ -4853,17 +5046,17 @@ state.subscribe((s) => {
 	}
 });
 
-// Cmd+Shift+S → snap (only when in RN mode)
+// Cmd+Shift+S → snap (replace existing slot), Cmd+Shift+V → snap as variant
+// (force a new card on the same slot). Both only when in RN mode.
 window.addEventListener("keydown", (e) => {
-	if (
-		(e.metaKey || e.ctrlKey) &&
-		e.shiftKey &&
-		(e.key === "s" || e.key === "S")
-	) {
-		if (state.get().source.kind === "iossim") {
-			e.preventDefault();
-			void doSnap();
-		}
+	if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
+	if (state.get().source.kind !== "iossim") return;
+	if (e.key === "s" || e.key === "S") {
+		e.preventDefault();
+		void doSnap("auto");
+	} else if (e.key === "v" || e.key === "V") {
+		e.preventDefault();
+		void doSnap("variant");
 	}
 });
 

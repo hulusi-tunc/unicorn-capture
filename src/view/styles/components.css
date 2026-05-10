@@ -343,6 +343,87 @@
 	justify-self: end;
 }
 
+/* Split snap button: main capture + caret dropdown for "Snap as variant" */
+.gtb-snap-group {
+	display: inline-flex;
+	align-items: stretch;
+	border-radius: 8px;
+	overflow: hidden;
+}
+.gtb-snap-group .gtb-snap-main {
+	border-top-right-radius: 0;
+	border-bottom-right-radius: 0;
+}
+.gtb-snap-group .gtb-snap-caret {
+	border-top-left-radius: 0;
+	border-bottom-left-radius: 0;
+	border-left: 1px solid oklch(1 0 0 / 0.18);
+	padding: 0 8px;
+	min-width: 0;
+}
+.gtb-snap-group .gtb-snap-caret:hover:not(:disabled) {
+	background: oklch(0.42 0.20 254);
+}
+
+/* Dropdown menu anchored to the caret */
+.gtb-snap-menu {
+	position: fixed;
+	z-index: 250;
+	min-width: 320px;
+	max-width: 380px;
+	background: var(--bg-0);
+	border: 1px solid var(--border-strong);
+	border-radius: 12px;
+	box-shadow: 0 24px 48px -16px oklch(0 0 0 / 0.35);
+	padding: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.gtb-snap-menu-item {
+	all: unset;
+	cursor: pointer;
+	padding: 10px 12px;
+	border-radius: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	transition: background 100ms var(--ease);
+}
+.gtb-snap-menu-item:hover {
+	background: var(--bg-1);
+}
+.gtb-snap-menu-item:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+}
+.gtb-snap-menu-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+.gtb-snap-menu-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-0);
+}
+.gtb-snap-menu-kbd {
+	font-family: var(--font-mono, "Space Mono", monospace);
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: var(--bg-1);
+	color: var(--fg-2);
+	letter-spacing: 0.04em;
+}
+.gtb-snap-menu-hint {
+	margin: 0;
+	font-size: 11px;
+	color: var(--fg-2);
+	line-height: 1.5;
+}
+
 /* Project-mode context block — name + bridge status pill.
    Sits in the slot the search occupies on dashboard. */
 .gtb-context {
@@ -3246,7 +3327,7 @@ kbd {
 	background: oklch(0 0 0 / 0.3);
 }
 .rn-lightbox-version-chip {
-	all: unset;
+	position: relative;
 	display: inline-flex;
 	flex-direction: column;
 	align-items: center;
@@ -3257,6 +3338,36 @@ kbd {
 	border: 2px solid transparent;
 	background: oklch(1 0 0 / 0.04);
 	transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.rn-lightbox-version-del {
+	all: unset;
+	position: absolute;
+	top: -6px;
+	right: -6px;
+	width: 18px;
+	height: 18px;
+	border-radius: 999px;
+	background: oklch(0.62 0.19 25);
+	color: white;
+	font-size: 12px;
+	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	box-shadow: 0 2px 6px oklch(0 0 0 / 0.4);
+	opacity: 0;
+	transform: scale(0.8);
+	transition: opacity 120ms var(--ease), transform 120ms var(--ease),
+		background 120ms var(--ease);
+}
+.rn-lightbox-version-chip:hover .rn-lightbox-version-del,
+.rn-lightbox-version-del:focus-visible {
+	opacity: 1;
+	transform: scale(1);
+}
+.rn-lightbox-version-del:hover {
+	background: oklch(0.55 0.21 25);
 }
 .rn-lightbox-version-chip:hover {
 	background: oklch(1 0 0 / 0.10);

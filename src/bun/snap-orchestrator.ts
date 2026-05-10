@@ -121,10 +121,16 @@ export interface SnapOrchestrator {
 	snap(opts?: {
 		/** Pin to a specific bridge by projectId — used when multiple RN apps are connected. */
 		projectId?: string;
+		/**
+		 * "auto" (default) — same (route, stateHash) replaces existing slot.
+		 * "variant" — always create a new card; skip slot lookup.
+		 */
+		mode?: "auto" | "variant";
 	}): Promise<
 		| {
 				ok: true;
 				record: SnapRecord;
+				recordKind: "replaced" | "appended";
 				/**
 				 * Which capture path produced the image. Useful for the UI
 				 * to surface why a snap is viewport-only ("bridge: <reason>").
@@ -155,6 +161,18 @@ export interface SnapOrchestrator {
 	 * Resolves with `false` if no matching snap was found.
 	 */
 	deleteSnap(sessionId: string, sequence: number): Promise<boolean>;
+	/**
+	 * Delete one entry from a snap's version history without deleting the
+	 * snap itself. `versionIdx` matches the lightbox: 0 = latest (current),
+	 * 1+ = a past entry from versions[]. Removing the latest promotes the
+	 * next-most-recent version up; removing the only remaining version
+	 * deletes the entire snap.
+	 */
+	deleteSnapVersion(
+		sessionId: string,
+		sequence: number,
+		versionIdx: number,
+	): Promise<"deleted" | "version-removed" | "promoted" | false>;
 	/**
 	 * Persist a user-assigned order for one flow. `ordered` is the new
 	 * left-to-right ordering of (sessionId, sequence) pairs. Snaps in the
@@ -524,15 +542,19 @@ export async function createSnapOrchestrator(
 
 	let sequence = 0;
 
-	async function snap(opts: { projectId?: string } = {}): Promise<
+	async function snap(
+		opts: { projectId?: string; mode?: "auto" | "variant" } = {},
+	): Promise<
 		| {
 				ok: true;
 				record: SnapRecord;
+				recordKind: "replaced" | "appended";
 				captureMethod: "full-page" | "simctl";
 				captureNote?: string;
 		  }
 		| { ok: false; error: string }
 	> {
+		const mode = opts.mode ?? "auto";
 		sequence += 1;
 		const seqStr = String(sequence).padStart(3, "0");
 
@@ -627,27 +649,35 @@ export async function createSnapOrchestrator(
 			};
 		}
 
-		// Re-snap detection: find an existing record at the same screen
-		// slot (projectId + route + stateHash). If we find one, REPLACE
-		// its current image instead of pushing a new record — preserves
-		// (sessionId, sequence) identity so the web-side frame_id stays
-		// stable, and keeps the user's drag-and-drop placement intact.
-		// Past captures stack into `versions[]` newest-first.
-		const slotKey = `${state.projectId} ${state.snapshot.route} ${stateHash}`;
+		// Re-snap detection: in "auto" mode, find an existing record at
+		// the same screen slot (projectId + route + stateHash). If we
+		// find one, REPLACE its current image instead of pushing a new
+		// record — preserves (sessionId, sequence) identity so the
+		// web-side frame_id stays stable, and keeps the user's
+		// drag-and-drop placement intact. Past captures stack into
+		// `versions[]` newest-first.
+		//
+		// In "variant" mode the user explicitly asks for a NEW record
+		// at the same slot (e.g. capturing a long page in chunks or
+		// comparing filter states). Skip the slot lookup so the snap
+		// always becomes a fresh card.
 		let existing: SnapRecord | null = null;
-		for (const s of manifest.sessions) {
-			for (const r of s.snaps) {
-				if (r.projectId !== state.projectId) continue;
-				if (r.route !== state.snapshot.route) continue;
-				if (r.stateHash !== stateHash) continue;
-				existing = r;
-				break;
+		if (mode === "auto") {
+			for (const s of manifest.sessions) {
+				for (const r of s.snaps) {
+					if (r.projectId !== state.projectId) continue;
+					if (r.route !== state.snapshot.route) continue;
+					if (r.stateHash !== stateHash) continue;
+					existing = r;
+					break;
+				}
+				if (existing) break;
 			}
-			if (existing) break;
 		}
 
 		const capturedAt = new Date().toISOString();
 		let record: SnapRecord;
+		let recordKind: "replaced" | "appended";
 		if (existing) {
 			// Push previous current to versions[] (newest first), update top.
 			const versions = existing.versions ?? [];
@@ -663,12 +693,12 @@ export async function createSnapOrchestrator(
 			// Drop any stale uploaded marker — the new image needs to push.
 			delete existing.uploaded;
 			record = existing;
+			recordKind = "replaced";
 			// We don't bump sequence/sessionId — identity is stable across
 			// re-snaps so the user sees the same card "refresh" rather than
 			// a duplicate. `sequence` was pre-incremented above; roll it back
 			// because we didn't actually create a new record.
 			sequence -= 1;
-			void slotKey;
 		} else {
 			const flow = ensureAutoFlow(state.snapshot.route, state.projectId);
 			record = {
@@ -684,6 +714,7 @@ export async function createSnapOrchestrator(
 				flowId: flow.id,
 			};
 			session.snaps.push(record);
+			recordKind = "appended";
 			if (!sessionAttached) {
 				manifest.sessions.push(session);
 				sessionAttached = true;
@@ -704,7 +735,7 @@ export async function createSnapOrchestrator(
 				: !fullPageOk && fullPage.status === "rejected"
 					? (fullPage.reason as Error)?.message
 					: undefined;
-		return { ok: true, record, captureMethod, captureNote };
+		return { ok: true, record, recordKind, captureMethod, captureNote };
 	}
 
 	function listAllSnaps(): SnapRecord[] {
@@ -1043,13 +1074,73 @@ export async function createSnapOrchestrator(
 				manifest.sessions = manifest.sessions.filter((x) => x !== s);
 				if (s === session) sessionAttached = false;
 			}
-			try {
-				await unlink(join(outDir, rec.image));
-			} catch {
-				// File may already be gone — ignore.
+			// Delete the latest image AND every archived version. Each
+			// version has its own PNG on disk (from the moment it was the
+			// "latest" before being pushed into versions[]).
+			const paths = [rec.image, ...(rec.versions ?? []).map((v) => v.image)];
+			for (const p of paths) {
+				try {
+					await unlink(join(outDir, p));
+				} catch {}
 			}
 			await saveManifest(manifestPath, manifest);
 			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Delete a single past version of a snap without deleting the snap itself.
+	 * `versionIdx` follows the lightbox convention:
+	 *   0   = the current/latest image. Removing this promotes versions[0]
+	 *         to current; if versions[] was empty, the entire snap is deleted.
+	 *   1+  = an entry in versions[] (versionIdx - 1). The PNG is unlinked
+	 *         and the slot is removed from the array.
+	 *
+	 * Returns "deleted" when the whole snap was removed (last version gone),
+	 * "version-removed" when only one entry was pruned, "promoted" when the
+	 * latest was deleted and a previous version took its place, or false
+	 * when the snap couldn't be located.
+	 */
+	async function deleteSnapVersion(
+		sId: string,
+		seq: number,
+		versionIdx: number,
+	): Promise<"deleted" | "version-removed" | "promoted" | false> {
+		for (const s of manifest.sessions) {
+			if (s.sessionId !== sId) continue;
+			const rec = s.snaps.find((r) => r.sequence === seq);
+			if (!rec) continue;
+			const versions = rec.versions ?? [];
+			if (versionIdx === 0) {
+				// Removing current. If we have a prior version, promote it.
+				if (versions.length === 0) {
+					// Last version standing — delete the whole snap.
+					return (await deleteSnap(sId, seq)) ? "deleted" : false;
+				}
+				try {
+					await unlink(join(outDir, rec.image));
+				} catch {}
+				const promoted = versions.shift()!;
+				rec.image = promoted.image;
+				rec.capturedAt = promoted.capturedAt;
+				rec.navStack = promoted.navStack;
+				delete rec.uploaded;
+				if (versions.length === 0) delete rec.versions;
+				else rec.versions = versions;
+				await saveManifest(manifestPath, manifest);
+				return "promoted";
+			}
+			const arrayIdx = versionIdx - 1;
+			if (arrayIdx < 0 || arrayIdx >= versions.length) return false;
+			const removed = versions.splice(arrayIdx, 1)[0]!;
+			try {
+				await unlink(join(outDir, removed.image));
+			} catch {}
+			if (versions.length === 0) delete rec.versions;
+			else rec.versions = versions;
+			await saveManifest(manifestPath, manifest);
+			return "version-removed";
 		}
 		return false;
 	}
@@ -1064,6 +1155,7 @@ export async function createSnapOrchestrator(
 		markUploaded,
 		listPendingUploads,
 		deleteSnap,
+		deleteSnapVersion,
 		reorderFlow,
 		listFlows: () => [...manifest.flows],
 		createFlow,
