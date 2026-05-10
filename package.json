@@ -10,6 +10,7 @@
 		"build": "electrobun build",
 		"build:canary": "electrobun build --env=canary",
 		"build:stable": "electrobun build --env=stable",
+		"build:signed": "bash -c 'set -a; [ -f .env.build ] && source .env.build; set +a; electrobun build --env=stable'",
 		"lint": "biome check src/",
 		"lint:fix": "biome check --write src/",
 		"ci": "biome check src/ && electrobun build"

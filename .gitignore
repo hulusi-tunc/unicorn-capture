@@ -21,3 +21,4 @@ tests/.out/
 .env
 .env.*
 !.env.example
+!.env.build.example
