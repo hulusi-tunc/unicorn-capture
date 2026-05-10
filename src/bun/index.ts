@@ -856,7 +856,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 try {
 	ApplicationMenu.setApplicationMenu([
 		{
-			label: "Prisma",
+			label: "Unicorn Studio",
 			submenu: [
 				{ role: "about" },
 				{ type: "separator" },
@@ -905,7 +905,7 @@ dbg("creating BrowserWindow…");
 let _win: BrowserWindow | null = null;
 try {
 	_win = new BrowserWindow({
-		title: "Prisma",
+		title: "Unicorn Studio",
 		url: "views://mainview/index.html",
 		frame: { x: 0, y: 0, width: 1440, height: 900 },
 		rpc,

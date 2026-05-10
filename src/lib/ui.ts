@@ -1,7 +1,7 @@
 // Single source for UI strings, defaults — no magic strings/numbers in components.
 
 export const UI = {
-	app: { name: "Prisma", tagline: "Visual flow testing & macro recorder" },
+	app: { name: "Unicorn Studio", tagline: "Visual flow testing & macro recorder" },
 	source: {
 		kinds: [
 			{

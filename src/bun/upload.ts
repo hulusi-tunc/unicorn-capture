@@ -27,6 +27,18 @@ export interface PlatformManifest {
 			image: string;
 			/** Index of this frame within its flow (display order). */
 			position?: number;
+			/**
+			 * Past captures of this same frame slot, captured before the
+			 * latest one (newest first). Mirrors Capture's `versions[]`
+			 * array — designer re-snapped this screen multiple times and
+			 * the platform should let viewers scrub through history.
+			 * Empty/undefined for frames that have only ever been snapped
+			 * once.
+			 */
+			versions?: Array<{
+				image: string;
+				capturedAt: string;
+			}>;
 		}>;
 	}>;
 }
@@ -160,18 +172,58 @@ function frameIdFromSnap(snap: SnapRecord): string {
 /**
  * Human-readable frame name. Drops route groups `(...)` and dynamic params
  * `[...]` from the displayed segments, then title-cases what's left.
+ *
+ * `variantIndex` differentiates multiple snaps that share the same
+ * (route, stateHash) slot — produced by Capture's "Snap as variant" path.
+ * Index 0 = the original; 1+ get a "(2)" / "(3)" suffix so the gallery
+ * sidebar can tell them apart at a glance.
  */
-function frameNameFromSnap(snap: SnapRecord): string {
+function frameNameFromSnap(snap: SnapRecord, variantIndex = 0): string {
 	const stack = snap.navStack ?? [];
 	const parts = stack.filter(
 		(s) => s && !s.startsWith("(") && !s.startsWith("["),
 	);
-	if (parts.length === 0) {
-		return stack.length === 0 ? "Welcome" : "Home";
+	const base =
+		parts.length === 0
+			? stack.length === 0
+				? "Welcome"
+				: "Home"
+			: parts
+					.map((s) => s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " "))
+					.join(" / ");
+	if (variantIndex <= 0) return base;
+	return `${base} (${variantIndex + 1})`;
+}
+
+/**
+ * Group snaps by their slot key (projectId + route + stateHash) and assign
+ * each a variant index — the position within its group, sorted by
+ * capturedAt. Used by frameNameFromSnap so the second variant of /home
+ * gets labeled "Home (2)" instead of colliding visually with the first.
+ */
+function buildVariantIndex(
+	allSnaps: readonly SnapRecord[],
+): Map<string, number> {
+	const byKey = new Map<string, SnapRecord[]>();
+	for (const s of allSnaps) {
+		const key = `${s.projectId}\t${s.route}\t${s.stateHash}`;
+		const list = byKey.get(key) ?? [];
+		list.push(s);
+		byKey.set(key, list);
 	}
-	return parts
-		.map((s) => s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " "))
-		.join(" / ");
+	const out = new Map<string, number>();
+	for (const list of byKey.values()) {
+		if (list.length === 1) {
+			// Single snap in this slot — no variants, no suffix needed.
+			out.set(`${list[0]!.sessionId}#${list[0]!.sequence}`, 0);
+			continue;
+		}
+		list.sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+		list.forEach((s, i) =>
+			out.set(`${s.sessionId}#${s.sequence}`, i),
+		);
+	}
+	return out;
 }
 
 /**
@@ -213,6 +265,7 @@ export function sessionToPlatformManifest(
 	const flowById = new Map(flows.map((f) => [f.id, f]));
 	const flowOrder = new Map(flows.map((f, i) => [f.id, i]));
 	const framePositions = buildFramePositionIndex(allSnaps);
+	const variantIndices = buildVariantIndex(allSnaps);
 
 	type Bucket = PlatformManifest["flows"][number];
 	const grouped = new Map<string, Bucket>();
@@ -232,11 +285,20 @@ export function sessionToPlatformManifest(
 			};
 			grouped.set(id, bucket);
 		}
+		const variantIdx =
+			variantIndices.get(`${snap.sessionId}#${snap.sequence}`) ?? 0;
 		bucket.frames.push({
 			id: frameIdFromSnap(snap),
-			name: frameNameFromSnap(snap),
+			name: frameNameFromSnap(snap, variantIdx),
 			image: snap.image,
 			position: framePositions.get(`${snap.sessionId}#${snap.sequence}`),
+			versions:
+				snap.versions && snap.versions.length > 0
+					? snap.versions.map((v) => ({
+							image: v.image,
+							capturedAt: v.capturedAt,
+						}))
+					: undefined,
 		});
 	}
 
@@ -389,6 +451,28 @@ async function uploadOne(args: {
 				bytes: new Uint8Array(bytes),
 			});
 			count++;
+			// Also bundle each past-version PNG. Server side keys captures
+			// by the manifest path so the same `name` string the server
+			// reads from frame.versions[i].image matches the multipart
+			// part name. Missing files are skipped — the version row
+			// won't have a usable image but the rest of the upload
+			// shouldn't fail.
+			for (const v of frame.versions ?? []) {
+				const vPath = join(outDir, v.image);
+				let vBytes: Buffer;
+				try {
+					vBytes = await readFile(vPath);
+				} catch {
+					continue;
+				}
+				parts.push({
+					name: v.image,
+					filename: basename(v.image),
+					contentType: "image/png",
+					bytes: new Uint8Array(vBytes),
+				});
+				count++;
+			}
 		}
 	}
 

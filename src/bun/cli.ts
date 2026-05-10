@@ -19,7 +19,7 @@ const orch = await createSnapOrchestrator({
 	outDir: OUT_DIR,
 });
 
-console.log("Prisma — RN snap mode");
+console.log("Unicorn Studio — RN snap mode");
 console.log(`  port:    ws://localhost:${PORT}`);
 console.log(`  out:     ${OUT_DIR}`);
 console.log(`  session: ${orch.sessionId}`);

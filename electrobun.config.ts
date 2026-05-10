@@ -2,7 +2,7 @@ import type { ElectrobunConfig } from "electrobun";
 
 export default {
 	app: {
-		name: "Prisma",
+		name: "Unicorn Studio",
 		identifier: "studio.unicorn.capture",
 		version: "0.0.1",
 	},
@@ -29,7 +29,7 @@ export default {
 		},
 		mac: {
 			bundleCEF: false,
-			icons: "assets/Prisma.iconset",
+			icons: "assets/UnicornStudio.iconset",
 			// Codesign + notarize gate on env vars: ELECTROBUN_DEVELOPER_ID
 			// must be set (the keychain identity from Developer ID Application
 			// cert). Notarize uses ELECTROBUN_APPLEID + ELECTROBUN_APPLEIDPASS
