@@ -1852,13 +1852,15 @@ const enterProject = (slug: string): void => {
 		rn: { ...cur.rn, selectedProjectSlug: slug },
 	}));
 	if (type === "mobile") {
-		// Pre-flight: re-scan the customer's app/ folder so any new routes added
-		// since the last session show up as placeholders. Fire-and-forget; the
-		// "what changed" banner picks up its results when the bridge re-emits.
-		void preflightRefresh(slug);
-		// Schedule the diff banner ~1.4s later so auto-refresh + bridge
-		// re-handshake have time to land before we compute the diff.
-		window.setTimeout(() => maybeShowChangesBanner(slug), 1400);
+		// "What changed" banner only — pre-flight auto-refresh is OFF by
+		// design. snap-flows-scan is destructive (regenerates from app/
+		// folder, overwrites any improver-refined or hand-edited
+		// snap-flows.ts). Auto-running it on every enterProject would
+		// silently nuke the user's Claude-refined flow grouping. The
+		// Refresh button on dashboard cards is manual + opt-in, intended
+		// for "I added routes, regenerate baseline" — not a navigation
+		// side-effect.
+		window.setTimeout(() => maybeShowChangesBanner(slug), 200);
 	}
 };
 const leaveProject = (): void => {
@@ -1868,15 +1870,6 @@ const leaveProject = (): void => {
 		rn: { ...cur.rn, selectedProjectSlug: null },
 	}));
 };
-
-async function preflightRefresh(slug: string): Promise<void> {
-	try {
-		await req.refreshProjectFlows({ slug });
-	} catch {
-		// Silent — project may not have a CLI installed (manual snap-flows.ts);
-		// the existing decl stays in place.
-	}
-}
 
 // ── "What changed since last entry" banner ────────────────────────────────
 //
@@ -3291,6 +3284,17 @@ async function doRefreshProjectFlows(
 ): Promise<void> {
 	const label = name || slug;
 	if (btn.classList.contains("is-busy")) return;
+	// Refresh re-runs snap-flows-scan, which OVERWRITES the customer's
+	// snap-flows.ts from app/ folder. If they've used the improver to
+	// regroup flows by user-journey (or hand-edited), this nukes that work.
+	// Force an explicit confirmation so the destructive nature is unmistakable.
+	const ok = await showConfirm({
+		title: `Regenerate flows for ${label}?`,
+		body: `Re-runs snap-flows-scan in the customer repo, which rebuilds snap-flows.ts from the app/ folder using the path-based heuristic. Any improver-refined or hand-edited flow grouping in that file will be replaced. Use this when you've added new routes; skip it if you've already curated the flows.`,
+		confirmLabel: "Regenerate (overwrites)",
+		danger: true,
+	});
+	if (!ok) return;
 	btn.classList.add("is-busy");
 	btn.disabled = true;
 	log(`Refreshing flows for ${label}…`, "info");
