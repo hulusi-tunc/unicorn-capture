@@ -3323,8 +3323,8 @@ async function doRefreshProjectFlows(
 async function doRemoveProject(slug: string, name?: string): Promise<void> {
 	const ok = await showConfirm({
 		title: `Remove "${name || slug}"?`,
-		body: `Removes the project from Capture's local registry — push targets, repo path, and project token. Doesn't touch the project's repo, the platform record, or any uploaded snaps. You can re-add it later via "+ Add".`,
-		confirmLabel: "Remove project",
+		body: `Archives the project on the gallery (90-day grace period) and drops it from Capture's local registry. Snaps stay safe — restore from the gallery's Archived list before the grace window ends. After 90 days, everything is permanently deleted. Doesn't touch your customer repo.`,
+		confirmLabel: "Archive project",
 		danger: true,
 	});
 	if (!ok) return;

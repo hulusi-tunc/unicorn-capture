@@ -648,8 +648,80 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					return { ok: false, error: (err as Error).message };
 				}
 			},
-			listProjects: async () => ({ projects: loadCaptureProjects() }),
+			listProjects: async () => {
+				// Sync archive status with platform on every list call. If the
+				// gallery archived a project (web UI or by another desktop),
+				// drop it locally so the dashboard doesn't show ghost cards.
+				// Best-effort: platform unreachable → keep local list as-is.
+				const local = loadCaptureProjects();
+				const archivedSlugs: string[] = [];
+				await Promise.all(
+					local.map(async (entry) => {
+						try {
+							const baseUrl = entry.uploadUrl.replace(/\/api\/captures\/upload$/, "");
+							const statusUrl = `${baseUrl}/api/projects/${encodeURIComponent(entry.slug)}/archive`;
+							const resp = await fetch(statusUrl, {
+								method: "GET",
+								headers: {
+									authorization: `Bearer ${entry.projectToken}`,
+								},
+							});
+							if (!resp.ok) return; // 401/403/404/network → leave entry alone
+							const json = (await resp.json()) as {
+								archived_at?: string | null;
+							};
+							if (json.archived_at) {
+								archivedSlugs.push(entry.slug);
+							}
+						} catch {
+							// silent — platform may be down, we'll catch it next poll
+						}
+					}),
+				);
+				for (const slug of archivedSlugs) {
+					removeCaptureProject(slug);
+				}
+				return { projects: loadCaptureProjects() };
+			},
 			removeProject: async ({ slug }) => {
+				// Capture's "Remove" button is now a soft-delete: archive the
+				// project on the gallery (90-day grace) AND drop it from the
+				// local registry. The user can /restore on web within the
+				// grace window if they change their mind. We don't have a
+				// desktop-side "undo archive" — once it's gone from the
+				// dashboard, they have to go to web → archived view → restore.
+				const entry = findProjectForBridge(slug);
+				if (!entry) {
+					// No registry entry — nothing to do remotely. Treat as
+					// success so the UI's optimistic remove doesn't bounce.
+					return { ok: true };
+				}
+				try {
+					const baseUrl = entry.uploadUrl.replace(/\/api\/captures\/upload$/, "");
+					const archiveUrl = `${baseUrl}/api/projects/${encodeURIComponent(slug)}/archive`;
+					const resp = await fetch(archiveUrl, {
+						method: "POST",
+						headers: {
+							"content-type": "application/json",
+							authorization: `Bearer ${entry.projectToken}`,
+						},
+						body: JSON.stringify({ reason: "user_initiated_desktop" }),
+					});
+					if (!resp.ok && resp.status !== 404) {
+						// 404 = the gallery already lost track of this app;
+						// treat that as fine (drop the local entry anyway).
+						const text = await resp.text();
+						return {
+							ok: false,
+							error: `Archive on platform failed (${resp.status}): ${text.slice(0, 200)}`,
+						};
+					}
+				} catch (err) {
+					return {
+						ok: false,
+						error: `Couldn't reach platform: ${(err as Error).message}`,
+					};
+				}
 				const ok = removeCaptureProject(slug);
 				if (!ok) return { ok: false, error: `No project with slug "${slug}"` };
 				return { ok: true };
