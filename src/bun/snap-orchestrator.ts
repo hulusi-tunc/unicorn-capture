@@ -131,6 +131,12 @@ export interface SnapOrchestrator {
 				ok: true;
 				record: SnapRecord;
 				recordKind: "replaced" | "appended";
+				placement: {
+					flowId: string;
+					flowName: string;
+					screenName?: string;
+					kind: "declared-match" | "auto-existing" | "auto-new";
+				};
 				/**
 				 * Which capture path produced the image. Useful for the UI
 				 * to surface why a snap is viewport-only ("bridge: <reason>").
@@ -398,33 +404,53 @@ export async function createSnapOrchestrator(
 	// Each project gets its own flow tree — folleli's "Home" and ovria's
 	// "Home" are separate rows even though they share `autoRoute: "/"`.
 	function ensureAutoFlow(route: string, projectId: string): Flow {
+		const r = ensureAutoFlowWithPlacement(route, projectId);
+		return r.flow;
+	}
+
+	/**
+	 * Same as ensureAutoFlow but also reports HOW the placement was made.
+	 * Used by the snap path so the view can show "Placed in <flow> →
+	 * <screen>" in the success toast — designers see at a glance whether
+	 * the snap landed in a curated flow or an auto-bucket.
+	 */
+	function ensureAutoFlowWithPlacement(
+		route: string,
+		projectId: string,
+	): {
+		flow: Flow;
+		kind: "declared-match" | "auto-existing" | "auto-new";
+		screenName?: string;
+	} {
 		// 1. Declared flows: if any flow's `screens` contains a route that
 		//    matches (literal or `:param`), the snap belongs there. This
 		//    is what makes "snap → fills a declared placeholder" work.
 		for (const f of manifest.flows) {
 			if (f.projectId !== projectId) continue;
 			if (!f.screens || f.screens.length === 0) continue;
-			if (f.screens.some((s) => orchRouteMatches(s.route, route))) {
-				return f;
+			const matchedScreen = f.screens.find((s) => orchRouteMatches(s.route, route));
+			if (matchedScreen) {
+				return { flow: f, kind: "declared-match", screenName: matchedScreen.name };
 			}
 		}
 		// 2. autoRoute lookup: existing auto-created flows.
-		let flow = manifest.flows.find(
+		const existing = manifest.flows.find(
 			(f) => f.autoRoute === route && f.projectId === projectId,
 		);
-		if (!flow) {
-			const parent = findAutoParent(route, projectId, manifest.flows);
-			flow = {
-				id: newFlowId(),
-				name: deriveFlowName(route),
-				autoRoute: route,
-				projectId,
-			};
-			if (parent) flow.parentFlowId = parent.id;
-			manifest.flows.push(flow);
-			manifestDirty = true;
+		if (existing) {
+			return { flow: existing, kind: "auto-existing" };
 		}
-		return flow;
+		const parent = findAutoParent(route, projectId, manifest.flows);
+		const flow: Flow = {
+			id: newFlowId(),
+			name: deriveFlowName(route),
+			autoRoute: route,
+			projectId,
+		};
+		if (parent) flow.parentFlowId = parent.id;
+		manifest.flows.push(flow);
+		manifestDirty = true;
+		return { flow, kind: "auto-new" };
 	}
 
 	// ── Migration: scope existing flows + snaps by project ────────────
@@ -549,6 +575,22 @@ export async function createSnapOrchestrator(
 				ok: true;
 				record: SnapRecord;
 				recordKind: "replaced" | "appended";
+				/**
+				 * Where the snap landed in the flow tree, plus how we got
+				 * there. The view uses this for the "📸 Placed in <flow>
+				 * → <screen>" toast so designers know at a glance whether
+				 * the snap fell into a curated flow or an auto-bucket.
+				 */
+				placement: {
+					flowId: string;
+					flowName: string;
+					/** Matched declared screen's display name, when applicable. */
+					screenName?: string;
+					kind:
+						| "declared-match" /** improver-curated flow + screen match */
+						| "auto-existing" /** existing auto-flow for this route */
+						| "auto-new"; /** brand-new auto-flow created on this snap */
+				};
 				captureMethod: "full-page" | "simctl";
 				captureNote?: string;
 		  }
@@ -678,6 +720,12 @@ export async function createSnapOrchestrator(
 		const capturedAt = new Date().toISOString();
 		let record: SnapRecord;
 		let recordKind: "replaced" | "appended";
+		let placement: {
+			flowId: string;
+			flowName: string;
+			screenName?: string;
+			kind: "declared-match" | "auto-existing" | "auto-new";
+		};
 		if (existing) {
 			// Push previous current to versions[] (newest first), update top.
 			const versions = existing.versions ?? [];
@@ -694,13 +742,24 @@ export async function createSnapOrchestrator(
 			delete existing.uploaded;
 			record = existing;
 			recordKind = "replaced";
+			// Look up the existing flow so the toast can name it; treat
+			// re-snaps as "auto-existing" since the slot was already there.
+			const existingFlow = manifest.flows.find((f) => f.id === existing!.flowId);
+			placement = {
+				flowId: existing.flowId,
+				flowName: existingFlow?.name ?? "Unknown",
+				kind: "auto-existing",
+			};
 			// We don't bump sequence/sessionId — identity is stable across
 			// re-snaps so the user sees the same card "refresh" rather than
 			// a duplicate. `sequence` was pre-incremented above; roll it back
 			// because we didn't actually create a new record.
 			sequence -= 1;
 		} else {
-			const flow = ensureAutoFlow(state.snapshot.route, state.projectId);
+			const placed = ensureAutoFlowWithPlacement(
+				state.snapshot.route,
+				state.projectId,
+			);
 			record = {
 				projectId: state.projectId,
 				sessionId,
@@ -711,10 +770,16 @@ export async function createSnapOrchestrator(
 				stateHash,
 				image: imageRel,
 				capturedAt,
-				flowId: flow.id,
+				flowId: placed.flow.id,
 			};
 			session.snaps.push(record);
 			recordKind = "appended";
+			placement = {
+				flowId: placed.flow.id,
+				flowName: placed.flow.name,
+				screenName: placed.screenName,
+				kind: placed.kind,
+			};
 			if (!sessionAttached) {
 				manifest.sessions.push(session);
 				sessionAttached = true;
@@ -735,7 +800,14 @@ export async function createSnapOrchestrator(
 				: !fullPageOk && fullPage.status === "rejected"
 					? (fullPage.reason as Error)?.message
 					: undefined;
-		return { ok: true, record, recordKind, captureMethod, captureNote };
+		return {
+			ok: true,
+			record,
+			recordKind,
+			placement,
+			captureMethod,
+			captureNote,
+		};
 	}
 
 	function listAllSnaps(): SnapRecord[] {

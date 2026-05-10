@@ -618,6 +618,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					ok: true,
 					snap: snapToInfo(r.record, orch.outDir),
 					recordKind: r.recordKind,
+					placement: r.placement,
 					captureMethod: r.captureMethod,
 					captureNote: r.captureNote,
 				};

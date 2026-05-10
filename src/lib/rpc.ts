@@ -310,6 +310,13 @@ export type ScenarioRunnerRPC = {
 							snap: RnSnapInfo;
 							/** "replaced" = same slot updated; "appended" = new card created (variant or first capture). */
 							recordKind?: "replaced" | "appended";
+							/** Where the snap landed in the flow tree + how (declared / auto). */
+							placement?: {
+								flowId: string;
+								flowName: string;
+								screenName?: string;
+								kind: "declared-match" | "auto-existing" | "auto-new";
+							};
 							/** Which path produced the image: bridge full-page or simctl viewport. */
 							captureMethod?: "full-page" | "simctl";
 							/** Reason the bridge full-page path didn't run, when fallback to simctl happened. */

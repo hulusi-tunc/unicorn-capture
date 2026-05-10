@@ -2075,6 +2075,7 @@ gtbAddBtn.addEventListener("click", () => openAddTypeChooser());
 const gtbThemeBtn = document.createElement("button");
 gtbThemeBtn.className = "btn btn-ghost btn-icon btn-sm";
 gtbThemeBtn.title = "Toggle theme";
+gtbThemeBtn.setAttribute("aria-label", "Toggle theme");
 gtbThemeBtn.appendChild(icon(theme.get() === "dark" ? "sun-medium" : "moon", { size: 14 }));
 gtbThemeBtn.addEventListener("click", () => {
 	const next = theme.toggle();
@@ -2082,12 +2083,23 @@ gtbThemeBtn.addEventListener("click", () => {
 	log(`Theme: ${next}`, "info");
 });
 
-// Project-view actions (mobile = iOS Sim).
+// Project-view back button — sits in the topbar's left column (col 1) so it
+// mirrors macOS conventions: navigate-back at top-left, primary actions at
+// top-right, identity in the middle. Lives outside .gtb-actions so the grid
+// can place it directly.
 const gtbBackBtn = document.createElement("button");
-gtbBackBtn.className = "btn btn-ghost btn-sm mode-project";
+gtbBackBtn.className = "btn btn-ghost btn-sm gtb-back mode-project";
 gtbBackBtn.title = "Back to dashboard";
-setBtnIcon(gtbBackBtn, "arrow-left", "Back");
+gtbBackBtn.setAttribute("aria-label", "Back to dashboard");
+setBtnIcon(gtbBackBtn, "arrow-left", "Dashboard");
 gtbBackBtn.addEventListener("click", () => leaveProject());
+
+// Hairline divider between the secondary cluster (theme) and the primary
+// cluster (push / snap) on the right side. Project mode only — the dashboard's
+// single primary action (Add) doesn't need separation.
+const gtbActionsSep = document.createElement("span");
+gtbActionsSep.className = "gtb-actions-sep mode-project";
+gtbActionsSep.setAttribute("aria-hidden", "true");
 
 const gtbPushBtn = document.createElement("button");
 gtbPushBtn.className = "btn btn-secondary mode-project";
@@ -2116,10 +2128,14 @@ gtbSnapCaret.addEventListener("click", (ev) => {
 });
 gtbSnapGroup.append(gtbSnapBtn, gtbSnapCaret);
 
+// Back button lives in column 1 of the topbar (next to the brand slot).
+// Inserted right after the brand so DOM order matches reading order.
+gtbBrand.insertAdjacentElement("afterend", gtbBackBtn);
+
 gtbActions.append(
-	gtbBackBtn,
-	gtbAddBtn,
 	gtbThemeBtn,
+	gtbActionsSep,
+	gtbAddBtn,
 	gtbPushBtn,
 	gtbSnapGroup,
 );
@@ -2239,14 +2255,22 @@ state.subscribe((s) => {
 	gtbPushBtn.disabled = r.pushing || r.busy || !hasAny;
 	gtbPushBtn.classList.toggle("is-busy", r.pushing);
 	gtbPushBtn.classList.toggle("is-repush", allPushed && !r.pushing);
-	const target = projectName ? `to ${projectName}` : "to web";
+	// Label is terse — project name lives in .gtb-context to the left,
+	// so we don't repeat it here. The leading icon (upload / refresh-cw)
+	// carries the verb; the label carries the count.
 	const pushLabel = r.pushing
-		? `Pushing… (${projectSnaps.length})`
+		? `Pushing ${projectSnaps.length}…`
 		: !hasAny
-			? "Nothing to push"
+			? "Push"
 			: allPushed
-				? `↻ Re-push ${projectSnaps.length} ${target}`
-				: `Push ${pendingCount} ${target}`;
+				? `Re-push ${projectSnaps.length}`
+				: `Push ${pendingCount}`;
+	const pushTitle = !hasAny
+		? "No snaps to push yet"
+		: allPushed
+			? `Re-upload all ${projectSnaps.length} snap${projectSnaps.length === 1 ? "" : "s"} to ${projectName ?? "the gallery"}`
+			: `Upload ${pendingCount} pending snap${pendingCount === 1 ? "" : "s"} to ${projectName ?? "the gallery"}`;
+	gtbPushBtn.title = pushTitle;
 	setBtnIcon(gtbPushBtn, r.pushing ? "loader" : allPushed ? "refresh-cw" : "upload", pushLabel);
 });
 syncGlobalTopbar();
@@ -3193,7 +3217,20 @@ async function doSnap(mode: "auto" | "variant" = "auto"): Promise<void> {
 				: mode === "variant"
 					? "Variant"
 					: "Snapped";
-		log(`✓ ${verb} #${r.snap.sequence} ${r.snap.route}`, "success");
+		// Build a "Placed in <flow> → <screen>" tail when the server told
+		// us where the snap landed. For declared-match the screen name is
+		// the curated label from snap-flows.ts; for auto-* the screen
+		// section is omitted (route already conveys it). Drag-and-drop
+		// existing on the card if the slot is wrong.
+		const place = r.placement;
+		const where = place
+			? place.kind === "declared-match" && place.screenName
+				? ` → Placed in ${place.flowName} → ${place.screenName}`
+				: place.kind === "auto-new"
+					? ` → New flow: ${place.flowName}`
+					: ` → Placed in ${place.flowName}`
+			: "";
+		log(`✓ ${verb} #${r.snap.sequence} ${r.snap.route}${where}`, "success");
 		// Diagnostic: tell the user which capture path actually produced
 		// the image, so "why is my long page cropped?" debugs itself.
 		if (r.captureMethod === "full-page") {
@@ -3203,6 +3240,12 @@ async function doSnap(mode: "auto" | "variant" = "auto"): Promise<void> {
 				? r.captureNote.replace(/^[A-Z]/, (c) => c.toLowerCase())
 				: "no SnapTarget registered or react-native-view-shot not installed";
 			log(`  ↳ viewport-only via simctl (bridge: ${why})`, "warn");
+		}
+		if (place && place.kind === "auto-new") {
+			log(
+				"  ↳ no declared screen matched — drag the card to a curated flow if you'd rather group it manually.",
+				"info",
+			);
 		}
 	} finally {
 		state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: false } }));

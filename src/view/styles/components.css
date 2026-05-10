@@ -250,22 +250,31 @@
 	line-height: 1.5;
 }
 
-/* ── GLOBAL TOPBAR ── persistent app chrome: brand + source tabs + actions.
-   Lives in index.html so it survives mode switches without being torn down. */
+/* ── GLOBAL TOPBAR ── persistent app chrome: brand + search/context + actions.
+   Lives in index.html so it survives mode switches without being torn down.
+   3-column grid: every slot has an explicit `grid-column` so hidden items
+   never collapse the layout. Center column always sits dead-centre. */
 #global-topbar {
 	flex-shrink: 0;
 	display: grid;
 	grid-template-columns: 1fr auto 1fr;
 	align-items: center;
 	gap: var(--space-3);
-	height: 60px;
-	padding: 0 var(--space-5);
+	height: 56px;
+	padding: 0 var(--space-4) 0 var(--space-5);
 	background: var(--bg-0);
 	border-bottom: 1px solid var(--border);
 	-webkit-app-region: drag;
 	font-family: var(--font);
 	z-index: 50;
 }
+/* Pin every known child to its column. Column 1 = left, 2 = centre, 3 = right.
+   Hidden siblings don't shift positions because columns are reserved by template. */
+.gtb-brand { grid-column: 1; justify-self: start; }
+.gtb-back  { grid-column: 1; justify-self: start; }
+.gtb-search  { grid-column: 2; justify-self: center; }
+.gtb-context { grid-column: 2; justify-self: center; }
+.gtb-actions { grid-column: 3; justify-self: end; }
 .gtb-brand {
 	all: unset;
 	-webkit-app-region: no-drag;
@@ -310,7 +319,6 @@
 	background: var(--bg-1);
 	border: 1px solid var(--border);
 	border-radius: 999px;
-	justify-self: center;
 	transition: border-color var(--dur) var(--ease);
 }
 .gtb-search:focus-within {
@@ -339,8 +347,17 @@
 .gtb-actions {
 	-webkit-app-region: no-drag;
 	display: inline-flex;
-	gap: var(--space-1);
-	justify-self: end;
+	align-items: center;
+	gap: var(--space-2);
+}
+/* Hairline divider between secondary group (back / theme) and primary
+   group (push / snap) so the row reads as two intent clusters. */
+.gtb-actions-sep {
+	display: inline-block;
+	width: 1px;
+	height: 18px;
+	background: var(--border);
+	margin: 0 var(--space-1);
 }
 
 /* Split snap button: main capture + caret dropdown for "Snap as variant" */
@@ -362,8 +379,10 @@
 	min-width: 0;
 }
 .gtb-snap-group .gtb-snap-caret:hover:not(:disabled) {
-	background: oklch(0.42 0.20 254);
+	background: var(--accent-2);
 }
+/* Stable digit width on dynamic-count buttons (Push 19 → Push 8 shouldn't reflow). */
+#gtb-actions .btn { font-variant-numeric: tabular-nums; }
 
 /* Dropdown menu anchored to the caret */
 .gtb-snap-menu {
@@ -425,13 +444,13 @@
 }
 
 /* Project-mode context block — name + bridge status pill.
-   Sits in the slot the search occupies on dashboard. */
+   In project mode the brand+search are hidden, so this becomes the
+   leftmost element and picks up the flex run. */
 .gtb-context {
 	-webkit-app-region: no-drag;
 	display: none;
 	align-items: center;
 	gap: 10px;
-	justify-self: center;
 	min-width: 0;
 }
 body[data-mode="mobile"] .gtb-context,
@@ -440,8 +459,9 @@ body[data-mode="web"] .gtb-context {
 }
 .gtb-context-name {
 	font-family: var(--font);
-	font-size: 13px;
+	font-size: 14px;
 	font-weight: 600;
+	letter-spacing: -0.01em;
 	color: var(--fg-0);
 	white-space: nowrap;
 	overflow: hidden;
@@ -453,16 +473,17 @@ body[data-mode="web"] .gtb-context {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	height: 24px;
-	padding: 0 10px;
-	background: var(--bg-1);
+	height: 22px;
+	padding: 0 9px;
+	background: transparent;
 	border: 1px solid var(--border);
 	border-radius: 999px;
 	font-family: var(--font);
 	font-size: 11px;
+	font-weight: 500;
 	color: var(--fg-2);
 	cursor: help;
-	transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+	transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .gtb-context-pill:hover {
 	border-color: var(--fg-3);
@@ -477,8 +498,14 @@ body[data-mode="web"] .gtb-context {
 	border-radius: 999px;
 	flex-shrink: 0;
 }
-.gtb-context-pill .dot.success { background: var(--success, #34c759); }
-.gtb-context-pill .dot.warn { background: var(--warn, #f5a524); }
+.gtb-context-pill .dot.success {
+	background: var(--ok);
+	box-shadow: 0 0 0 3px oklch(from var(--ok) l c h / 0.18);
+}
+.gtb-context-pill .dot.warn {
+	background: var(--warn);
+	box-shadow: 0 0 0 3px oklch(from var(--warn) l c h / 0.18);
+}
 .gtb-context-pill-label {
 	white-space: nowrap;
 }
@@ -493,9 +520,6 @@ body:not([data-mode="web"]) .mode-web { display: none; }
    is the only identity we need, and it frees space for the action row. */
 body:not([data-mode="dashboard"]) .gtb-search,
 body:not([data-mode="dashboard"]) .gtb-brand { display: none; }
-/* When the brand is hidden, let the context block claim the left column
-   so it sits flush instead of floating in the centre. */
-body:not([data-mode="dashboard"]) .gtb-context { justify-self: start; }
 
 /* "or" divider between URL input and the dropzone in the merged Web mode. */
 .src-divider {
