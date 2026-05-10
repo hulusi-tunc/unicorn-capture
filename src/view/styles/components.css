@@ -2451,6 +2451,48 @@ kbd {
 .rn-insp-dot.warn { background: oklch(0.75 0.15 80); }
 .rn-insp-dot.error { background: oklch(0.62 0.19 25); }
 
+/* Long-page capture row — Enable / Disable buttons + hint copy */
+.rn-insp-fullpage {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 2px;
+}
+.rn-insp-fullpage-hint {
+	margin: 0;
+	font-size: 11px;
+	color: var(--fg-2);
+	line-height: 1.5;
+}
+.rn-insp-fullpage-row {
+	display: flex;
+	gap: 6px;
+}
+.rn-insp-fullpage-btn {
+	all: unset;
+	cursor: pointer;
+	padding: 5px 10px;
+	border-radius: 6px;
+	background: var(--accent);
+	color: #fff;
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.02em;
+	transition: opacity 120ms var(--ease);
+}
+.rn-insp-fullpage-btn:hover {
+	opacity: 0.9;
+}
+.rn-insp-fullpage-btn-ghost {
+	background: transparent;
+	color: var(--fg-2);
+	border: 1px solid var(--border);
+}
+.rn-insp-fullpage-btn-ghost:hover {
+	border-color: var(--fg-3);
+	color: var(--fg-1);
+}
+
 .rn-lightbox-footer {
 	display: flex;
 	align-items: center;

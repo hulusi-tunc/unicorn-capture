@@ -3545,6 +3545,49 @@ async function doDeleteSnap(snap: RnSnapInfo): Promise<void> {
 }
 
 /**
+ * Enable / disable full-page capture for a single screen. Calls the
+ * snap-bridge wrap-screen CLI in the customer repo via the bun side.
+ * After a successful wrap the next Snap on this route will full-page
+ * by default (bridge view-shot path). Expo's Metro hot-reload picks
+ * up the wrapped file automatically.
+ */
+async function doToggleFullPage(
+	snap: RnSnapInfo,
+	mode: "wrap" | "unwrap",
+): Promise<void> {
+	const slug = snap.projectId;
+	if (!slug) return;
+	const verb = mode === "wrap" ? "Enable" : "Disable";
+	log(`${verb} long-page capture for ${snap.route}…`, "info");
+	try {
+		const r = await req.wrapScreenForFullPage({
+			slug,
+			route: snap.route,
+			mode,
+		});
+		if (!r.ok) {
+			log(`${verb} failed: ${r.error}`, "error");
+			return;
+		}
+		log(
+			mode === "wrap"
+				? `✓ Long-page capture enabled for ${snap.route} — Cmd+R the iOS sim, then re-snap.`
+				: `✓ Long-page capture disabled for ${snap.route}.`,
+			"success",
+		);
+		// Surface CLI hints (backup path, manual fix instructions).
+		for (const line of r.output.split("\n").slice(-4)) {
+			const t = line.trim();
+			if (t.startsWith("Backup") || t.startsWith("If this") || t.startsWith("Manual fix")) {
+				log(`  ${t}`, "info");
+			}
+		}
+	} catch (err) {
+		log(`${verb} failed: ${(err as Error).message}`, "error");
+	}
+}
+
+/**
  * Delete a single past version of a snap from inside the lightbox version
  * scrubber. Confirms before destructive — the latest version's removal
  * promotes versions[0] to current, the only-version case wipes the snap
@@ -4659,6 +4702,13 @@ function openSnapLightbox(
 	const inspUploadLabel = ce("div", "rn-insp-label");
 	inspUploadLabel.textContent = "Upload";
 	const inspUpload = ce("div", "rn-insp-upload");
+
+	// Full-page capture toggle row. Surfaces an "Enable long-page capture
+	// for <route>" affordance so the designer can opt this one screen
+	// into bridge full-page mode without dropping into a terminal.
+	const inspFullPageLabel = ce("div", "rn-insp-label");
+	inspFullPageLabel.textContent = "Long-page";
+	const inspFullPage = ce("div", "rn-insp-fullpage");
 	inspector.append(
 		inspRouteLabel,
 		inspRoute,
@@ -4670,6 +4720,8 @@ function openSnapLightbox(
 		inspState,
 		inspUploadLabel,
 		inspUpload,
+		inspFullPageLabel,
+		inspFullPage,
 	);
 
 	// Version scrubber strip — sits below the bezel inside stageMain.
@@ -4811,6 +4863,31 @@ function openSnapLightbox(
 			text.textContent = `Failed — ${cur.uploaded.error}`;
 		}
 		inspUpload.append(dot, text);
+
+		// Long-page capture row. We can't reliably introspect whether the
+		// customer's screen file already has a snap-target wrap from here
+		// (would need a fingerprint per snap), so we offer both Enable +
+		// Disable buttons; the CLI handles "already wrapped" / "not
+		// wrapped" idempotently and surfaces the result via toast.
+		inspFullPage.replaceChildren();
+		const fpHint = ce("p", "rn-insp-fullpage-hint");
+		fpHint.textContent =
+			"Enable to capture this screen end-to-end (off-screen content too) on next snap.";
+		const fpRow = ce("div", "rn-insp-fullpage-row");
+		const fpEnable = ce("button", "rn-insp-fullpage-btn");
+		fpEnable.type = "button";
+		fpEnable.textContent = "Enable";
+		fpEnable.addEventListener("click", () =>
+			void doToggleFullPage(cur, "wrap"),
+		);
+		const fpDisable = ce("button", "rn-insp-fullpage-btn rn-insp-fullpage-btn-ghost");
+		fpDisable.type = "button";
+		fpDisable.textContent = "Disable";
+		fpDisable.addEventListener("click", () =>
+			void doToggleFullPage(cur, "unwrap"),
+		);
+		fpRow.append(fpEnable, fpDisable);
+		inspFullPage.append(fpHint, fpRow);
 
 		renderVersionStrip();
 	};

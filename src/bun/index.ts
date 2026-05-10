@@ -123,14 +123,85 @@ function resolveLocalSnapFlowsBin(
 	rnAppDir: string,
 	repoRoot: string,
 ): string | null {
+	return resolveLocalBridgeBin(rnAppDir, repoRoot, "snap-flows-scan");
+}
+
+function resolveLocalBridgeBin(
+	rnAppDir: string,
+	repoRoot: string,
+	binName: string,
+): string | null {
 	const candidates = [
-		join(rnAppDir, "node_modules", ".bin", "snap-flows-scan"),
-		join(repoRoot, "node_modules", ".bin", "snap-flows-scan"),
+		join(rnAppDir, "node_modules", ".bin", binName),
+		join(repoRoot, "node_modules", ".bin", binName),
 	];
 	for (const c of candidates) {
 		if (existsSync(c)) return c;
 	}
 	return null;
+}
+
+/**
+ * Run `snap-bridge-wrap-screen <route>` (or --unwrap) in the customer
+ * repo. Pairs with the dashboard's "Enable long-page capture" button so
+ * designers can opt a single screen into full-page snap mode without
+ * hand-editing app/.
+ */
+async function runWrapScreenForProject(
+	slug: string,
+	route: string,
+	mode: "wrap" | "unwrap" | "list",
+): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
+	const project = findProjectForBridge(slug);
+	if (!project) return { ok: false, error: `No project with slug "${slug}"` };
+	const rnAppDir = project.rnAppDir;
+	if (!rnAppDir || !existsSync(rnAppDir)) {
+		return {
+			ok: false,
+			error: `RN app dir "${rnAppDir ?? "<unset>"}" doesn't exist on disk.`,
+		};
+	}
+	const pmRoot = project.repoPath && existsSync(project.repoPath)
+		? project.repoPath
+		: rnAppDir;
+	const localBin = resolveLocalBridgeBin(rnAppDir, pmRoot, "snap-bridge-wrap-screen");
+	const cmd = localBin ?? "npx";
+	const baseArgs = localBin
+		? []
+		: ["-y", "github:hulusi-tunc/snap-bridge#v0.6.1", "snap-bridge-wrap-screen"];
+	const cliArgs: string[] = [];
+	if (mode === "list") cliArgs.push("--list");
+	else cliArgs.push(route);
+	if (mode === "unwrap") cliArgs.push("--unwrap");
+	const args = [...baseArgs, ...cliArgs];
+
+	return new Promise((resolve) => {
+		const child = spawn(cmd, args, {
+			cwd: rnAppDir,
+			env: process.env,
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (d: Buffer) => {
+			stdout += d.toString();
+		});
+		child.stderr.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+		child.on("error", (err: Error) => {
+			resolve({ ok: false, error: `Failed to spawn ${cmd}: ${err.message}` });
+		});
+		child.on("close", (code: number | null) => {
+			if (code !== 0) {
+				resolve({
+					ok: false,
+					error: (stderr || stdout || `Exited with code ${code}`).trim(),
+				});
+				return;
+			}
+			resolve({ ok: true, output: stdout.trim() });
+		});
+	});
 }
 
 /**
@@ -168,7 +239,7 @@ async function runSnapFlowsScanForProject(
 	const cmd = localBin ?? "npx";
 	const baseArgs = localBin
 		? []
-		: ["-y", "github:hulusi-tunc/snap-bridge#v0.5.0", "snap-flows-scan"];
+		: ["-y", "github:hulusi-tunc/snap-bridge#v0.6.1", "snap-flows-scan"];
 	const args = mode === "merge" ? [...baseArgs, "--merge"] : baseArgs;
 
 	return new Promise((resolve) => {
@@ -753,6 +824,9 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 			},
 			refreshProjectFlows: async ({ slug, mode }) => {
 				return runSnapFlowsScanForProject(slug, mode ?? "merge");
+			},
+			wrapScreenForFullPage: async ({ slug, route, mode }) => {
+				return runWrapScreenForProject(slug, route, mode);
 			},
 			initProject: async (input) => {
 				const result = await initProject(input);

@@ -451,6 +451,17 @@ export type ScenarioRunnerRPC = {
 					  }
 					| { ok: false; error: string };
 			};
+			wrapScreenForFullPage: {
+				params: {
+					slug: string;
+					route: string;
+					/** "wrap" enables full-page on this route; "unwrap" reverts. */
+					mode: "wrap" | "unwrap";
+				};
+				response:
+					| { ok: true; output: string }
+					| { ok: false; error: string };
+			};
 			initProject: {
 				params: {
 					repoPath: string;
