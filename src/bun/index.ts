@@ -141,8 +141,9 @@ function resolveLocalSnapFlowsBin(
  */
 async function runSnapFlowsScanForProject(
 	slug: string,
+	mode: "merge" | "regenerate" = "merge",
 ): Promise<
-	| { ok: true; output: string; flowsFound?: number; screensFound?: number }
+	| { ok: true; output: string; flowsFound?: number; screensFound?: number; mode: "merge" | "regenerate" }
 	| { ok: false; error: string }
 > {
 	const project = findProjectForBridge(slug);
@@ -165,9 +166,10 @@ async function runSnapFlowsScanForProject(
 	// scan even with a stale dependency pin.
 	const localBin = resolveLocalSnapFlowsBin(rnAppDir, pmRoot);
 	const cmd = localBin ?? "npx";
-	const args = localBin
+	const baseArgs = localBin
 		? []
-		: ["-y", "github:hulusi-tunc/snap-bridge#v0.2.1", "snap-flows-scan"];
+		: ["-y", "github:hulusi-tunc/snap-bridge#v0.5.0", "snap-flows-scan"];
+	const args = mode === "merge" ? [...baseArgs, "--merge"] : baseArgs;
 
 	return new Promise((resolve) => {
 		const child = spawn(cmd, args, {
@@ -197,13 +199,15 @@ async function runSnapFlowsScanForProject(
 				});
 				return;
 			}
-			// Pull the "N flow(s), M screen(s)" tally out of the output.
+			// Pull the "N flow(s), M screen(s)" tally out of the output
+			// (regenerate mode) or the "Merged N new route" line (merge mode).
 			const m = stdout.match(/(\d+)\s+flow\(s\),\s+(\d+)\s+screen\(s\)/);
 			resolve({
 				ok: true,
 				output: stdout.trim(),
 				flowsFound: m ? Number(m[1]) : undefined,
 				screensFound: m ? Number(m[2]) : undefined,
+				mode,
 			});
 		});
 	});
@@ -726,8 +730,8 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				if (!ok) return { ok: false, error: `No project with slug "${slug}"` };
 				return { ok: true };
 			},
-			refreshProjectFlows: async ({ slug }) => {
-				return runSnapFlowsScanForProject(slug);
+			refreshProjectFlows: async ({ slug, mode }) => {
+				return runSnapFlowsScanForProject(slug, mode ?? "merge");
 			},
 			initProject: async (input) => {
 				const result = await initProject(input);

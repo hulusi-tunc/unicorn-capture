@@ -3284,22 +3284,20 @@ async function doRefreshProjectFlows(
 ): Promise<void> {
 	const label = name || slug;
 	if (btn.classList.contains("is-busy")) return;
-	// Refresh re-runs snap-flows-scan, which OVERWRITES the customer's
-	// snap-flows.ts from app/ folder. If they've used the improver to
-	// regroup flows by user-journey (or hand-edited), this nukes that work.
-	// Force an explicit confirmation so the destructive nature is unmistakable.
-	const ok = await showConfirm({
-		title: `Regenerate flows for ${label}?`,
-		body: `Re-runs snap-flows-scan in the customer repo, which rebuilds snap-flows.ts from the app/ folder using the path-based heuristic. Any improver-refined or hand-edited flow grouping in that file will be replaced. Use this when you've added new routes; skip it if you've already curated the flows.`,
-		confirmLabel: "Regenerate (overwrites)",
-		danger: true,
-	});
-	if (!ok) return;
+	// Two-mode picker: "Add missing" (default, safe — runs --merge so
+	// curated grouping survives) vs "Regenerate" (destructive — rewrites
+	// snap-flows.ts from scratch). Most day-N clicks are the safe path;
+	// the destructive one stays available but never default.
+	const mode = await showRefreshModePicker(label);
+	if (!mode) return;
 	btn.classList.add("is-busy");
 	btn.disabled = true;
-	log(`Refreshing flows for ${label}…`, "info");
+	log(
+		`${mode === "merge" ? "Scanning for new routes" : "Regenerating snap-flows.ts"} for ${label}…`,
+		"info",
+	);
 	try {
-		const r = await req.refreshProjectFlows({ slug });
+		const r = await req.refreshProjectFlows({ slug, mode });
 		if (!r.ok) {
 			log(`Refresh failed for ${label}: ${r.error}`, "error");
 			return;
@@ -3550,6 +3548,108 @@ function showConfirm(opts: {
 	});
 }
 
+
+/**
+ * Two-mode picker for the Refresh button. "Add missing routes" runs
+ * snap-flows-scan --merge (additive, safe). "Regenerate" rewrites the
+ * file from scratch, discarding any improver-refined or hand-edited
+ * grouping. Resolves with `null` if the user cancels.
+ */
+function showRefreshModePicker(
+	label: string,
+): Promise<"merge" | "regenerate" | null> {
+	return new Promise((resolve) => {
+		const backdrop = document.createElement("div");
+		backdrop.className = "rn-confirm-backdrop";
+		const dlg = document.createElement("div");
+		dlg.className = "rn-confirm-dialog rn-refresh-dialog";
+
+		const title = document.createElement("h3");
+		title.className = "rn-confirm-title";
+		title.textContent = `Refresh flows for ${label}`;
+
+		const intro = document.createElement("p");
+		intro.className = "rn-confirm-body";
+		intro.textContent =
+			"Pick how to update snap-flows.ts in the customer repo. The default is non-destructive.";
+
+		const opts = document.createElement("div");
+		opts.className = "rn-refresh-options";
+
+		const mkOption = (
+			value: "merge" | "regenerate",
+			heading: string,
+			detail: string,
+			danger: boolean,
+			recommended: boolean,
+		): HTMLButtonElement => {
+			const b = document.createElement("button");
+			b.type = "button";
+			b.className = `rn-refresh-option${danger ? " is-danger" : ""}${recommended ? " is-recommended" : ""}`;
+			const h = document.createElement("div");
+			h.className = "rn-refresh-option-head";
+			const hLabel = document.createElement("span");
+			hLabel.className = "rn-refresh-option-title";
+			hLabel.textContent = heading;
+			h.appendChild(hLabel);
+			if (recommended) {
+				const tag = document.createElement("span");
+				tag.className = "rn-refresh-option-tag";
+				tag.textContent = "Recommended";
+				h.appendChild(tag);
+			}
+			const d = document.createElement("p");
+			d.className = "rn-refresh-option-body";
+			d.textContent = detail;
+			b.append(h, d);
+			b.addEventListener("click", () => close(value));
+			return b;
+		};
+
+		const mergeBtn = mkOption(
+			"merge",
+			"Add missing routes",
+			"Scans app/ and adds any new routes under a “Recently added” bucket. Curated user-journey grouping stays intact.",
+			false,
+			true,
+		);
+		const regenBtn = mkOption(
+			"regenerate",
+			"Regenerate from scratch",
+			"Rebuilds snap-flows.ts with the path-based heuristic. Replaces any improver-refined or hand-edited grouping.",
+			true,
+			false,
+		);
+		opts.append(mergeBtn, regenBtn);
+
+		const actions = document.createElement("div");
+		actions.className = "rn-confirm-actions";
+		const cancelBtn = document.createElement("button");
+		cancelBtn.className = "btn btn-ghost";
+		cancelBtn.textContent = "Cancel";
+		actions.appendChild(cancelBtn);
+
+		dlg.append(title, intro, opts, actions);
+		backdrop.appendChild(dlg);
+		document.body.appendChild(backdrop);
+
+		const close = (result: "merge" | "regenerate" | null): void => {
+			backdrop.remove();
+			document.removeEventListener("keydown", onKey);
+			resolve(result);
+		};
+		const onKey = (e: KeyboardEvent): void => {
+			if (e.key === "Escape") close(null);
+			else if (e.key === "Enter") close("merge");
+		};
+		cancelBtn.addEventListener("click", () => close(null));
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close(null);
+		});
+		document.addEventListener("keydown", onKey);
+		queueMicrotask(() => mergeBtn.focus());
+	});
+}
 
 /**
  * Push dialog with an optional commit-message-style note. Resolves with

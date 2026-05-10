@@ -10,7 +10,7 @@
  * The dev case (point at a local checkout, an unreleased branch, etc.)
  * is supported via the `SNAP_BRIDGE_REF` env var.
  */
-const DEFAULT_REF = "github:hulusi-tunc/snap-bridge#v0.5.0";
+const DEFAULT_REF = "github:hulusi-tunc/snap-bridge#v0.6.0";
 
 export function getSnapBridgeRef(): string {
 	const override = process.env.SNAP_BRIDGE_REF?.trim();

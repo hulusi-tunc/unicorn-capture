@@ -290,33 +290,75 @@ export function buildImprovePrompt(slug: string): ImproveResult {
 	const meta = readProjectMeta(rnAppDir);
 	const peeks = gatherScreenPeeks(rnAppDir);
 
+	// Cross-check what's in app/ against what's already declared in snap-
+	// flows.ts. Routes that exist on disk but aren't in the declaration
+	// (e.g. designer added a screen yesterday, hasn't run --merge yet) are
+	// surfaced to Claude with a "place these in the right user-journey
+	// flow" hint, so the next refinement pass folds them in cleanly.
+	const declaredRoutes = extractDeclaredRoutes(flowsContents);
+	const undeclaredPeeks = peeks.filter((p) => !declaredRoutes.has(p.route));
+	const orphanDeclaredRoutes = [...declaredRoutes].filter(
+		(r) => !peeks.some((p) => p.route === r),
+	);
+
 	const projectSection = `## Project context\n\n${renderProjectMeta(meta)}\n`;
 	const screensSection =
 		peeks.length > 0
 			? `## Screens (with code peeks)\n\n${peeks.map(renderScreenPeek).join("\n\n")}\n`
 			: "";
-	const flowsSection = `## Current snap-flows.ts (heuristic baseline)\n\n\`\`\`ts\n${flowsContents}\n\`\`\``;
+	const undeclaredSection =
+		undeclaredPeeks.length > 0
+			? `## Routes in app/ not yet declared in snap-flows.ts\n\nThese routes exist on disk but the current declaration doesn't include them. Fold them into the right user-journey flow as part of your refinement — don't leave them in a "Recently added" bucket.\n\n${undeclaredPeeks.map((p) => `- \`${p.route}\` → ${p.docComment ? p.docComment.slice(0, 120) : `(see screen peek above)`}`).join("\n")}\n`
+			: "";
+	const orphanSection =
+		orphanDeclaredRoutes.length > 0
+			? `## Declared routes that no longer exist in app/\n\nThese routes are in snap-flows.ts but the file scan didn't find them — they may have been removed or renamed. Drop them from the declaration unless you have reason to keep them.\n\n${orphanDeclaredRoutes.map((r) => `- \`${r}\``).join("\n")}\n`
+			: "";
+	const flowsSection = `## Current snap-flows.ts\n\n\`\`\`ts\n${flowsContents}\n\`\`\``;
 
-	const clipboardPayload =
-		PROMPT_HEADER +
-		projectSection +
-		"\n" +
-		screensSection +
-		"\n" +
-		flowsSection +
-		PROMPT_FOOTER;
+	const sections = [
+		PROMPT_HEADER,
+		projectSection,
+		screensSection,
+		undeclaredSection,
+		orphanSection,
+		flowsSection,
+		PROMPT_FOOTER,
+	].filter(Boolean);
+	const clipboardPayload = sections.join("\n");
 
 	const flowMatches = flowsContents.match(/\bid:\s*["'][^"']+["']/g) ?? [];
 	const screenMatches =
 		flowsContents.match(/\broute:\s*["'][^"']+["']/g) ?? [];
-	const summary =
-		peeks.length > 0
-			? `${flowMatches.length} flows, ${screenMatches.length} screens, ${peeks.length} peeks`
-			: `${flowMatches.length} flows, ${screenMatches.length} screens`;
+	const summaryParts: string[] = [
+		`${flowMatches.length} flows`,
+		`${screenMatches.length} screens`,
+	];
+	if (peeks.length > 0) summaryParts.push(`${peeks.length} peeks`);
+	if (undeclaredPeeks.length > 0)
+		summaryParts.push(`${undeclaredPeeks.length} undeclared`);
+	if (orphanDeclaredRoutes.length > 0)
+		summaryParts.push(`${orphanDeclaredRoutes.length} orphan`);
+	const summary = summaryParts.join(", ");
 
 	return {
 		clipboardPayload,
 		flowsFilePath,
 		summary,
 	};
+}
+
+/**
+ * Pull all `route: "..."` literals out of an existing snap-flows.ts so we
+ * can diff them against what's actually in app/. Same regex shape as the
+ * CLI's --merge mode helper. Naive but reliable for declaration files.
+ */
+function extractDeclaredRoutes(src: string): Set<string> {
+	const set = new Set<string>();
+	const re = /route\s*:\s*["'`]([^"'`]+)["'`]/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(src))) {
+		if (m[1]) set.add(m[1]);
+	}
+	return set;
 }

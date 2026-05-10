@@ -412,13 +412,14 @@ export type ScenarioRunnerRPC = {
 				response: { ok: true } | { ok: false; error: string };
 			};
 			refreshProjectFlows: {
-				params: { slug: string };
+				params: { slug: string; mode?: "merge" | "regenerate" };
 				response:
 					| {
 							ok: true;
 							output: string;
 							flowsFound?: number;
 							screensFound?: number;
+							mode: "merge" | "regenerate";
 					  }
 					| { ok: false; error: string };
 			};
