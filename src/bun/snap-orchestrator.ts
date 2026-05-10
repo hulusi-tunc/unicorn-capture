@@ -82,7 +82,18 @@ export interface SnapRecord {
 	route: string;
 	navStack?: string[];
 	stateHash: string;
+	/**
+	 * Local file path (relative to outDir). Set after the bridge writes a
+	 * PNG to disk. May be empty for snaps pulled from the gallery — those
+	 * keep `remoteImageUrl` until the bytes are actually needed locally.
+	 */
 	image: string;
+	/**
+	 * Public Supabase Storage URL. Set on snaps pulled from the gallery
+	 * (sync-from-cloud). The view layer prefers `image` (local) and falls
+	 * back to this when the local file isn't on disk yet.
+	 */
+	remoteImageUrl?: string;
 	capturedAt: string;
 	uploaded?: UploadInfo;
 	/**

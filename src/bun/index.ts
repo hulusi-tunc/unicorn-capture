@@ -474,7 +474,11 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 		navStack: s.navStack,
 		stateHash: s.stateHash,
 		capturedAt: s.capturedAt,
-		imagePath: join(outDir, s.image),
+		// Empty `s.image` = remote-only snap (pulled from gallery, never
+		// downloaded). Pass an empty path so the view knows to fall back
+		// to `remoteImageUrl`.
+		imagePath: s.image ? join(outDir, s.image) : "",
+		remoteImageUrl: s.remoteImageUrl,
 		uploaded: s.uploaded
 			? s.uploaded.ok
 				? { ok: true, buildId: s.uploaded.buildId ?? "" }
@@ -483,7 +487,7 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 		position: s.position,
 		flowId: s.flowId,
 		versions: s.versions?.map((v) => ({
-			imagePath: join(outDir, v.image),
+			imagePath: v.image ? join(outDir, v.image) : "",
 			capturedAt: v.capturedAt,
 			navStack: v.navStack,
 		})),

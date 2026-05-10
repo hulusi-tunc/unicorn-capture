@@ -36,9 +36,12 @@ export interface RunResult {
 /**
  * Subset of SnapRecord that the view needs. Keep flat — RPC traverses JSON.
  * `imagePath` is an absolute path; the view loads it via file:// URL.
+ * `remoteImageUrl` is set on snaps pulled from the gallery (sync-from-cloud)
+ * — the view falls back to it when the local file isn't on disk yet.
  */
 export interface RnSnapVersion {
 	imagePath: string;
+	remoteImageUrl?: string;
 	capturedAt: string;
 	navStack?: string[];
 }
@@ -52,6 +55,7 @@ export interface RnSnapInfo {
 	stateHash: string;
 	capturedAt: string;
 	imagePath: string;
+	remoteImageUrl?: string;
 	uploaded?: { ok: true; buildId: string } | { ok: false; error: string };
 	/** User-assigned sort position from drag-and-drop. Undefined = no override. */
 	position?: number;

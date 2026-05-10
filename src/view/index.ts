@@ -1419,6 +1419,144 @@ function waitForFrameReady(
 	});
 }
 
+// ─── WEB MODE — Library snaps (manual workflow, MVP) ───────────────────
+//
+// Each "snap" in web mode is a screenshot of whatever URL the iframe is
+// currently showing. Cards live in the Library tab + are persisted in
+// localStorage so they survive across Capture restarts. No flow tree
+// yet — designers organize manually with their own taxonomy via Claude
+// Code (paste-mode improver) or just an "All snaps" bucket.
+
+interface WebSnapRecord {
+	id: string;
+	url: string;
+	title?: string;
+	capturedAt: string;
+	imagePath: string;
+}
+
+const WEB_SNAPS_KEY = "prisma:web-snaps";
+
+function loadWebSnaps(): WebSnapRecord[] {
+	const raw = readLocal(WEB_SNAPS_KEY);
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? (parsed as WebSnapRecord[]) : [];
+	} catch {
+		return [];
+	}
+}
+
+function saveWebSnaps(snaps: WebSnapRecord[]): void {
+	writeLocal(WEB_SNAPS_KEY, JSON.stringify(snaps));
+}
+
+function appendWebSnap(snap: WebSnapRecord): void {
+	const list = loadWebSnaps();
+	list.unshift(snap);
+	saveWebSnaps(list);
+	if (webRefs) renderWebLibrary(webRefs);
+}
+
+function removeWebSnap(id: string): void {
+	const list = loadWebSnaps().filter((s) => s.id !== id);
+	saveWebSnaps(list);
+	if (webRefs) renderWebLibrary(webRefs);
+}
+
+async function doWebSnap(): Promise<void> {
+	if (!webRefs) return;
+	const iframe = webRefs.iframe;
+	const rect = iframe.getBoundingClientRect();
+	if (rect.width <= 0 || rect.height <= 0) {
+		log("Web snap: iframe isn't sized yet — load a URL first.", "warn");
+		return;
+	}
+	const x = window.screenX + rect.left;
+	const y =
+		window.screenY + rect.top + (window.outerHeight - window.innerHeight);
+	const id = `web-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(36)}`;
+	const url = webRefs.urlInput.value.trim() || iframe.src || "(no url)";
+	let title: string | undefined;
+	try {
+		title = iframe.contentDocument?.title || undefined;
+	} catch {
+		// Cross-origin iframe; can't read title. That's fine.
+	}
+	const r = await req.captureRect({
+		x: Math.max(0, x),
+		y: Math.max(0, y),
+		width: rect.width,
+		height: rect.height,
+		name: `web-${id}`,
+	});
+	if (!r.ok) {
+		log(`Web snap failed: ${r.error}`, "error");
+		return;
+	}
+	const snap: WebSnapRecord = {
+		id,
+		url,
+		title,
+		capturedAt: new Date().toISOString(),
+		imagePath: r.path as string,
+	};
+	appendWebSnap(snap);
+	log(`✓ Web snap captured — ${url}`, "success");
+}
+
+function renderWebLibrary(refs: WebRefs): void {
+	const grid = refs.libraryGrid;
+	const list = loadWebSnaps();
+	grid.replaceChildren();
+	if (list.length === 0) {
+		const empty = ce("div", "web-library-empty");
+		const i = ce("div", "web-library-empty-icon");
+		i.appendChild(icon("image", { size: 28, strokeWidth: 1.5 }));
+		const t = ce("div", "web-library-empty-title");
+		t.textContent = "No snaps yet";
+		const h = ce("div", "web-library-empty-hint");
+		h.textContent =
+			"Switch to Live, load a URL and press Snap to start building your library.";
+		empty.append(i, t, h);
+		grid.appendChild(empty);
+		return;
+	}
+	for (const s of list) {
+		const card = ce("div", "web-library-card");
+		const thumb = ce("img", "web-library-thumb");
+		thumb.src = toFileUrl(s.imagePath);
+		thumb.alt = s.title ?? s.url;
+		thumb.loading = "lazy";
+		const meta = ce("div", "web-library-meta");
+		const title = ce("div", "web-library-title");
+		title.textContent = s.title || hostnameOf(s.url);
+		const url = ce("div", "web-library-url");
+		url.textContent = s.url;
+		url.title = s.url;
+		const time = ce("div", "web-library-time");
+		time.textContent = new Date(s.capturedAt).toLocaleString();
+		meta.append(title, url, time);
+		const del = ce("button", "web-library-del");
+		del.type = "button";
+		del.title = "Delete";
+		del.setAttribute("aria-label", `Delete snap ${s.url}`);
+		del.textContent = "×";
+		del.addEventListener("click", () => removeWebSnap(s.id));
+		card.append(thumb, meta, del);
+		grid.appendChild(card);
+	}
+}
+
+function hostnameOf(url: string): string {
+	try {
+		return new URL(url).hostname;
+	} catch {
+		return url;
+	}
+}
+
 async function captureCurrentRect(name: string): Promise<string | null> {
 	const vp = $<HTMLElement>("#preview-viewport");
 	if (!vp) return null;
@@ -2342,6 +2480,19 @@ function toFileUrl(absPath: string): string {
 	return `http://localhost:9876/img?path=${encodeURIComponent(absPath)}`;
 }
 
+/**
+ * Resolve the best image URL for a snap. Local file (served via the
+ * snap-server proxy) is always preferred; falls back to the gallery's
+ * Supabase Storage URL on snaps that were pulled-from-cloud and never
+ * downloaded yet. Returns an empty string if neither is available — the
+ * caller should hide the bezel image in that case.
+ */
+function snapImageSrc(s: { imagePath?: string; remoteImageUrl?: string }): string {
+	if (s.imagePath && s.imagePath.length > 0) return toFileUrl(s.imagePath);
+	if (s.remoteImageUrl && s.remoteImageUrl.length > 0) return s.remoteImageUrl;
+	return "";
+}
+
 function routeShortLabel(snap: RnSnapInfo): string {
 	const stack = snap.navStack ?? [];
 	const parts = stack.filter((seg) => seg && !seg.startsWith("(") && !seg.startsWith("["));
@@ -3050,7 +3201,10 @@ function buildWebLayout(): WebRefs {
 		paneLibrary.classList.toggle("is-active", !liveActive);
 	};
 	tabLive.addEventListener("click", () => setTab("live"));
-	tabLibrary.addEventListener("click", () => setTab("library"));
+	tabLibrary.addEventListener("click", () => {
+		setTab("library");
+		if (webRefs) renderWebLibrary(webRefs);
+	});
 	libCta.addEventListener("click", () => setTab("live"));
 	// Initialize active state classes (mirror is-active to legacy `active` for tab styling parity).
 	tabLive.classList.add("active");
@@ -3100,9 +3254,12 @@ function buildWebLayout(): WebRefs {
 			iframe.src = iframe.src;
 		} catch {}
 	});
-	snapBtn.addEventListener("click", () => {
-		log("Web snap — capture system coming soon", "info");
-	});
+	snapBtn.addEventListener("click", () => void doWebSnap());
+
+	// Render the library grid initially + whenever it changes. The Live
+	// tab's URL bar share state with the same urlInput so loading a URL
+	// while on Library doesn't lose the typed value.
+	renderWebLibrary(refs);
 	sourceUrlInput.addEventListener("input", () => setUrl(sourceUrlInput.value));
 	sourceUrlInput.addEventListener("keydown", (e) => {
 		if (e.key === "Enter") loadIframe();
@@ -4576,7 +4733,7 @@ function applyRnState(s: AppState): void {
 			const bezel = ce("div", "rn-bezel");
 			const bezelScreen = ce("div", "rn-bezel-screen");
 			const img = ce("img", "rn-bezel-img");
-			img.src = toFileUrl(snap.imagePath);
+			img.src = snapImageSrc(snap);
 			img.alt = `${snap.route} #${snap.sequence}`;
 			img.loading = "lazy";
 			bezelScreen.appendChild(img);
@@ -4993,7 +5150,7 @@ function openSnapLightbox(
 					: cur.versions?.[i - 1];
 			if (!v) continue;
 			const thumb = ce("img", "rn-lightbox-version-thumb");
-			thumb.src = toFileUrl(v.imagePath);
+			thumb.src = snapImageSrc(v);
 			thumb.alt = "";
 			thumb.loading = "lazy";
 			const label = ce("span", "rn-lightbox-version-label");
