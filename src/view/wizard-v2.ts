@@ -12,6 +12,7 @@
  * share a streamed log built from `onInitProgress` events.
  */
 
+import { icon } from "../lib/icon";
 import type {
 	InstallPlanInput,
 	InstallProgressMessage,
@@ -222,13 +223,17 @@ export function openWizardV2(deps: WizardDeps): void {
 		sec.className = "wiz2-section wiz2-section-install";
 		sec.hidden = true;
 		sec.innerHTML = `
-			<h3>Installing…</h3>
+			<h3 class="with-spin-prefix"><span class="wiz2-installing-text">Installing…</span></h3>
 			<ol class="wiz2-step-list"></ol>
 			<details class="wiz2-output">
 				<summary>View command output</summary>
 				<pre class="wiz2-output-pre"></pre>
 			</details>
 		`;
+		// Prepend a Lucide loader SVG so the heading carries the activity-language
+		// spinner prefix. The CSS rule `.with-spin-prefix > .ic` rotates it.
+		const h3 = sec.querySelector("h3")!;
+		h3.prepend(icon("loader", { size: 16 }));
 		return sec;
 	}
 
@@ -616,37 +621,55 @@ export function openWizardV2(deps: WizardDeps): void {
 		btn: HTMLButtonElement,
 		statusEl: HTMLElement,
 	): Promise<void> {
+		const originalLabel = btn.textContent ?? "Copy improver prompt";
 		btn.disabled = true;
-		statusEl.textContent = "Building prompt…";
+		btn.classList.add("is-busy");
+		btn.replaceChildren(
+			icon("loader", { size: 14 }),
+			document.createTextNode("Building prompt…"),
+		);
+		statusEl.classList.add("with-spin-prefix");
+		statusEl.replaceChildren(
+			icon("loader", { size: 12 }),
+			document.createTextNode("Building prompt…"),
+		);
+		const resetStatus = (text: string): void => {
+			statusEl.classList.remove("with-spin-prefix");
+			statusEl.textContent = text;
+		};
 		try {
 			const r = (await deps.req.improveSnapFlows({ slug })) as
 				| { ok: true; clipboardPayload: string; flowsFilePath: string; summary: string }
 				| { ok: false; error: string };
 			if (!r.ok) {
-				statusEl.textContent = `Failed: ${r.error}`;
+				resetStatus(`Failed: ${r.error}`);
 				deps.log(`Improver failed: ${r.error}`, "error");
+				btn.classList.remove("is-busy");
+				btn.replaceChildren(document.createTextNode(originalLabel));
 				btn.disabled = false;
 				return;
 			}
 			const copied = await copyToClipboard(r.clipboardPayload);
+			btn.classList.remove("is-busy");
 			if (copied) {
-				statusEl.textContent = `Copied (${r.summary}) — paste into Claude Code`;
+				resetStatus(`Copied (${r.summary}) — paste into Claude Code`);
 				deps.log(`✨ Improver prompt copied (${r.summary})`, "success");
-				btn.textContent = "✓ Copied";
+				btn.replaceChildren(document.createTextNode("✓ Copied"));
 			} else {
-				statusEl.textContent =
-					"Couldn't access the clipboard — opening a fallback window";
+				resetStatus("Couldn't access the clipboard — opening a fallback window");
 				deps.log(
 					"Clipboard blocked by WKWebView — opened the prompt in a viewer window so you can copy manually",
 					"warn",
 				);
 				openPromptViewer(r.clipboardPayload, r.summary);
-				btn.textContent = "View prompt";
+				btn.replaceChildren(document.createTextNode("View prompt"));
 				btn.disabled = false;
 			}
 		} catch (err) {
-			statusEl.textContent = `Failed: ${(err as Error).message}`;
+			resetStatus(`Failed: ${(err as Error).message}`);
 			deps.log(`Improver crashed: ${(err as Error).message}`, "error");
+			btn.classList.remove("is-busy");
+			btn.replaceChildren(document.createTextNode(originalLabel));
 			btn.disabled = false;
 		}
 	}

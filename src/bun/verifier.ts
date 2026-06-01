@@ -7,6 +7,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
+import { getAugmentedSpawnEnv } from "./init";
 import type { StepCtx, Step } from "./installer";
 import type { SnapServer } from "./snap-server";
 
@@ -179,7 +180,7 @@ function spawnExpo(ctx: StepCtx): ChildProcessWithoutNullStreams {
 
 	const child = spawn(pm, args, {
 		cwd,
-		env: { ...process.env, CI: "1" }, // CI=1 keeps Expo from opening QR-code prompts
+		env: { ...getAugmentedSpawnEnv(), CI: "1" }, // CI=1 keeps Expo from opening QR-code prompts
 	});
 
 	const handleData = (buf: Buffer) => {

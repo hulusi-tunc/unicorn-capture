@@ -29,10 +29,13 @@ import {
 	Search,
 	Settings,
 	Smartphone,
+	Sparkles,
 	SunMedium,
 	Trash2,
 	Upload,
 	X,
+	Zap,
+	ZapOff,
 } from "lucide";
 
 // Allow-list of icons we actually use. Add new ones here as needed.
@@ -62,10 +65,13 @@ export const ICONS = {
 	search: Search,
 	settings: Settings,
 	smartphone: Smartphone,
+	sparkles: Sparkles,
 	"sun-medium": SunMedium,
 	trash: Trash2,
 	upload: Upload,
 	x: X,
+	zap: Zap,
+	"zap-off": ZapOff,
 };
 
 export type IconName = keyof typeof ICONS;

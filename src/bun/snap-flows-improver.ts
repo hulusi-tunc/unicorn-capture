@@ -94,10 +94,15 @@ const PROMPT_FOOTER = `
 
 ## Output
 
-Return the entire updated snap-flows.ts contents in a single \`\`\`ts code
-fence. After the file, give me a 2-3 line summary of what you changed
-(added flows, renamed screens, sub-flow restructuring) so I can scan it
-quickly before saving.
+Use your Edit/Write tool to overwrite the snap-flows.ts file in this
+project (it's at the path shown in the "Current snap-flows.ts" section
+above — usually \`./snap-flows.ts\` or \`mobile/snap-flows.ts\` relative
+to the repo root). Don't print the file in the chat; just edit it.
+
+After saving, give me a 2-3 line summary of what you changed (added
+flows, renamed screens, sub-flow restructuring) so I can scan it
+quickly. The Capture desktop app picks up the change via Metro
+fast-refresh — no restart needed.
 `;
 
 /**
@@ -267,6 +272,97 @@ function renderScreenPeek(p: ScreenPeek): string {
 	return sections.join("\n");
 }
 
+export interface WebFlowGroup {
+	id: string;
+	name: string;
+	routes: string[];
+}
+
+/**
+ * Web-mode improver. There's no `snap-flows.ts` for web — the source of
+ * truth is whatever routes have been snapped + their auto-flow grouping
+ * in the orchestrator manifest. Builds a Claude prompt that asks the
+ * LLM to regroup the routes by user journey and OUTPUT a JSON
+ * structure that the desktop reads back to apply rename + reflow ops.
+ * Clipboard mode mirrors mobile: zero API cost, designer pastes into
+ * Claude Code (or any LLM), saves the response, Capture parses it.
+ */
+export function buildWebImprovePrompt(
+	slug: string,
+	currentFlows: WebFlowGroup[],
+): ImproveResult {
+	const project = findProjectForBridge(slug);
+	if (!project) throw new Error(`No project with slug "${slug}"`);
+	const meta = readProjectMeta(project.rnAppDir ?? "/tmp");
+	meta.name = project.name ?? meta.name;
+	if (project.baseUrl) {
+		meta.description =
+			(meta.description ? `${meta.description}\n` : "") +
+			`Base URL: ${project.baseUrl}`;
+	}
+
+	const flowsSection = currentFlows.length
+		? `## Current flow grouping (auto-derived from URL path prefix)\n\n${currentFlows
+				.map(
+					(f) =>
+						`### ${f.name} (\`${f.id}\`)\n${f.routes.map((r) => `- \`${r}\``).join("\n")}`,
+				)
+				.join("\n\n")}`
+		: "## Current flow grouping\n\n(no snaps yet)";
+
+	const PROMPT_HEADER = `# Improve web flow grouping
+
+You're regrouping a web app's captured routes into user-journey-shaped
+flows. The current grouping (at the bottom) was auto-derived from the
+URL path's first segment, which is a useful baseline but doesn't always
+match how a real user moves through the product.
+
+## Rules
+
+1. Keep every \`route\` value verbatim — don't edit URLs.
+2. Group by user journey, not by URL prefix. Examples:
+   - \`/sign-in\`, \`/sign-up\`, \`/forgot-password\` → "Auth"
+   - \`/checkout\`, \`/cart\`, \`/payment\`, \`/order-confirmation\` → "Checkout"
+   - \`/profile\`, \`/settings\`, \`/account/billing\` → "Account"
+3. Display order should mirror a natural product walkthrough — entry/
+   landing first, primary loops next, account/admin last.
+4. Don't invent flows for routes that don't exist in the input.
+
+`;
+
+	const PROMPT_FOOTER = `
+
+## Output
+
+Return JSON in a single \`\`\`json code fence with this exact shape:
+
+\`\`\`json
+{
+  "flows": [
+    { "id": "auth", "name": "Auth", "routes": ["/sign-in", "/sign-up"] },
+    { "id": "checkout", "name": "Checkout", "routes": ["/cart", "/checkout"] }
+  ]
+}
+\`\`\`
+
+After the JSON, give me a 2-3 line summary of what you changed (renamed
+flows, merged groups, reordered). I'll paste your JSON back into
+Capture's "Apply web flows" prompt to commit the changes.
+`;
+
+	const projectSection = `## Project context\n\n${renderProjectMeta(meta)}\n`;
+	const clipboardPayload = [PROMPT_HEADER, projectSection, flowsSection, PROMPT_FOOTER].join("\n");
+
+	const routeCount = currentFlows.reduce((n, f) => n + f.routes.length, 0);
+	const summary = `${currentFlows.length} flows, ${routeCount} routes`;
+
+	return {
+		clipboardPayload,
+		flowsFilePath: `${project.repoPath ?? ""}/.unicorn-web-flows.json`,
+		summary,
+	};
+}
+
 export function buildImprovePrompt(slug: string): ImproveResult {
 	const project = findProjectForBridge(slug);
 	if (!project) {
@@ -314,7 +410,7 @@ export function buildImprovePrompt(slug: string): ImproveResult {
 		orphanDeclaredRoutes.length > 0
 			? `## Declared routes that no longer exist in app/\n\nThese routes are in snap-flows.ts but the file scan didn't find them — they may have been removed or renamed. Drop them from the declaration unless you have reason to keep them.\n\n${orphanDeclaredRoutes.map((r) => `- \`${r}\``).join("\n")}\n`
 			: "";
-	const flowsSection = `## Current snap-flows.ts\n\n\`\`\`ts\n${flowsContents}\n\`\`\``;
+	const flowsSection = `## Current snap-flows.ts (file to edit: \`${flowsFilePath}\`)\n\n\`\`\`ts\n${flowsContents}\n\`\`\``;
 
 	const sections = [
 		PROMPT_HEADER,

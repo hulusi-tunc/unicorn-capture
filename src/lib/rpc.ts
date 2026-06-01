@@ -51,12 +51,16 @@ export interface RnSnapInfo {
 	sequence: number;
 	projectId: string;
 	route: string;
+	/** User-renamed label shown on the card; falls back to `route` when unset. */
+	displayName?: string;
 	navStack?: string[];
 	stateHash: string;
 	capturedAt: string;
 	imagePath: string;
 	remoteImageUrl?: string;
-	uploaded?: { ok: true; buildId: string } | { ok: false; error: string };
+	uploaded?:
+		| { ok: true; buildId: string; uploadedAt?: string }
+		| { ok: false; error: string; uploadedAt?: string };
 	/** User-assigned sort position from drag-and-drop. Undefined = no override. */
 	position?: number;
 	/** Which flow this snap belongs to. Always set. */
@@ -67,6 +71,11 @@ export interface RnSnapInfo {
 	 * the slot has only ever been captured once.
 	 */
 	versions?: RnSnapVersion[];
+	/**
+	 * Web-only. True when the PNG is a full-page CDP capture (taller than
+	 * the viewport). Library renders these as tall scrollable tiles.
+	 */
+	fullPage?: boolean;
 }
 
 export interface RnFlowScreen {
@@ -74,6 +83,8 @@ export interface RnFlowScreen {
 	name: string;
 	route: string;
 	stateHash?: string;
+	/** Soft-deleted in Capture UI — placeholder is suppressed. */
+	hidden?: boolean;
 }
 
 export interface RnFlow {
@@ -98,6 +109,8 @@ export interface RnProjectInfo {
 	repoPath?: string;
 	rnAppDir?: string;
 	registeredAt: string;
+	/** Web-only: persisted base URL the iframe auto-loads on entry. */
+	baseUrl?: string;
 }
 
 export interface RnInitStep {
@@ -307,6 +320,21 @@ export type ScenarioRunnerRPC = {
 					 *   the same long page (top/middle/bottom) or filter states.
 					 */
 					mode?: "auto" | "variant";
+					/**
+					 * When set, the snap is placed into this flow regardless of
+					 * the route's auto-flow. Used by the "Capture into this flow"
+					 * button in flow headers. Re-snap detection still runs but is
+					 * scoped to the forced flow only — match → replace, else
+					 * append a new card into the flow.
+					 */
+					forceFlowId?: string;
+					/**
+					 * When set, the snap REPLACES this specific record's image
+					 * regardless of route/state. Used by the "Re-snap" button in
+					 * the lightbox to update a focused screen. Wins over
+					 * `forceFlowId` and `mode` if both are present.
+					 */
+					forceScreen?: { sessionId: string; sequence: number };
 				};
 				response:
 					| {
@@ -343,7 +371,52 @@ export type ScenarioRunnerRPC = {
 					synced: number;
 					failed: number;
 					errors: string[];
+					/**
+					 * Per-image entries for screenshots that couldn't be
+					 * uploaded because the local PNG was missing or
+					 * unreadable on disk. Surfaces in the post-push
+					 * summary modal so the user can see what didn't make
+					 * it instead of silently dropping records.
+					 */
+					skipped: Array<{
+						projectId: string;
+						image: string;
+						reason: "missing-file" | "read-error" | "too-large";
+						bytes?: number;
+					}>;
 				};
+			};
+			/**
+			 * Force-evict the local PNG cache for a project's pushed
+			 * snaps, ignoring the 7-day grace window. Intended for the
+			 * "Clear pushed snaps" settings button when the user wants
+			 * to reclaim disk now. Snaps that have not been pushed (no
+			 * `remoteImageUrl`) are left alone so nothing is lost.
+			 */
+			clearPushedSnaps: {
+				params: { projectSlug?: string };
+				response: {
+					ok: true;
+					deleted: number;
+					freedBytes: number;
+				};
+			};
+			/**
+			 * Pull frames + flow tree from the gallery for a project and import
+			 * them as remote-only snaps (no local PNG download). Used to restore
+			 * a project on a fresh PC, or after disk loss.
+			 */
+			syncFromGallery: {
+				params: { projectSlug: string };
+				response:
+					| {
+							ok: true;
+							flowsAdded: number;
+							flowsRemoved: number;
+							framesAdded: number;
+							framesSkipped: number;
+					  }
+					| { ok: false; error: string };
 			};
 			deleteSnap: {
 				params: { sessionId: string; sequence: number };
@@ -381,6 +454,22 @@ export type ScenarioRunnerRPC = {
 			};
 			renameFlow: {
 				params: { flowId: string; name: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			reparentFlow: {
+				params: { flowId: string; newParentId?: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			renameScreen: {
+				params: { flowId: string; declaredId: string; name: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			hideScreen: {
+				params: { flowId: string; declaredId: string };
+				response: { ok: true } | { ok: false; error: string };
+			};
+			renameSnap: {
+				params: { sessionId: string; sequence: number; name: string };
 				response: { ok: true } | { ok: false; error: string };
 			};
 			moveSnapsToFlow: {
@@ -497,6 +586,9 @@ export type ScenarioRunnerRPC = {
 											| "merge-flows"
 											| "install-view-shot"
 											| "open-layout"
+											| "boot-simulator"
+											| "launch-expo"
+											| "reconnect-bridge"
 											| "manual";
 										label: string;
 										target?: string;
@@ -514,9 +606,80 @@ export type ScenarioRunnerRPC = {
 						| "bump-snap-bridge"
 						| "regenerate-flows"
 						| "merge-flows"
-						| "install-view-shot";
+						| "install-view-shot"
+						| "boot-simulator"
+						| "launch-expo"
+						| "reconnect-bridge";
 				};
 				response: { ok: true; output: string } | { ok: false; error: string };
+			};
+			/**
+			 * Standalone "Launch Expo" — spawn `<pm> expo start` in the
+			 * project's RN app dir. Detached so killing Capture doesn't
+			 * kill Expo. Same RPC the Doctor panel's launch-expo fix
+			 * uses; exposed separately so a project-card "Launch" button
+			 * can call it directly.
+			 */
+			launchExpo: {
+				params: { slug: string };
+				response: { ok: true; output: string } | { ok: false; error: string };
+			};
+			/**
+			 * Force-close every connected bridge socket. The bridge's
+			 * onclose handler triggers its 3s auto-reconnect, so within
+			 * a few seconds the bridge is back with a fresh hello.
+			 * Surfaced as "Reconnect" in the Doctor panel.
+			 */
+			reconnectBridge: {
+				params: Record<string, never>;
+				response: { ok: true };
+			};
+			/**
+			 * Open Simulator.app. macOS-only. Equivalent to clicking the
+			 * dock icon — restores the last-used device.
+			 */
+			bootSimulator: {
+				params: Record<string, never>;
+				response: { ok: true; output: string } | { ok: false; error: string };
+			};
+			/**
+			 * Poll the current bridge route for the topbar live indicator.
+			 * Returns null when no bridge is connected for the project.
+			 * Cheap, designed to be called every 2s while a project is
+			 * open and the bridge is connected.
+			 */
+			getBridgeRoute: {
+				params: { projectSlug: string };
+				response: {
+					ok: true;
+					route: string | null;
+					stateHash?: string;
+				};
+			};
+			/**
+			 * Run a one-click tour over every declared screen in a
+			 * project: navigate → wait for ready → snap → repeat. Returns
+			 * the per-screen result so the summary modal can show what
+			 * succeeded vs. failed. Blocks until the whole tour finishes
+			 * (or a step errors past timeout).
+			 */
+			runProjectTour: {
+				params: { projectSlug: string };
+				response:
+					| {
+							ok: true;
+							total: number;
+							succeeded: number;
+							failed: number;
+							visits: Array<{
+								flowName: string;
+								screenName: string;
+								route: string;
+								ok: boolean;
+								error?: string;
+							}>;
+					  }
+					| { ok: false; error: string };
 			};
 			initProject: {
 				params: {
@@ -529,6 +692,140 @@ export type ScenarioRunnerRPC = {
 					token?: string;
 				};
 				response: RnInitOutcome;
+			};
+			/**
+			 * Web-only equivalent of `initProject`. No bridge install, no
+			 * Metro patching — just register a project on the gallery so
+			 * snaps can be pushed to it, and persist the entry locally with
+			 * its `baseUrl` so the iframe knows where to load when the user
+			 * re-enters the project.
+			 */
+			createWebProject: {
+				params: {
+					name: string;
+					slug?: string;
+					baseUrl: string;
+					platformUrl: string;
+					setupToken: string;
+					/**
+					 * Optional seed flows produced by `discoverWebRoutes`
+					 * + auto-grouping. When set, the orchestrator
+					 * pre-creates these flows so the project's sidebar
+					 * shows a populated tree before the first snap. Same
+					 * shape as applyFlowGrouping so the path-prefix
+					 * helper can be reused on the view side.
+					 */
+					seedFlows?: Array<{ id: string; name: string; routes: string[] }>;
+				};
+				response:
+					| {
+							ok: true;
+							slug: string;
+							projectToken: string;
+							restored?: boolean;
+							reused?: boolean;
+							seededFlows?: number;
+					  }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Record a snap captured from the web mode iframe. Mirrors the
+			 * mobile snap pipeline (auto-flow from path prefix, sequence
+			 * numbering, placement reporting) — minus the bridge state +
+			 * simctl half, since web captures come pre-rendered from
+			 * `captureRect`.
+			 */
+			performWebSnap: {
+				params: {
+					slug: string;
+					url: string;
+					tempImagePath: string;
+					title?: string;
+				};
+				response:
+					| {
+							ok: true;
+							snap: RnSnapInfo;
+							route: string;
+							placement: {
+								flowId: string;
+								flowName: string;
+								screenName?: string;
+								kind: "auto-existing" | "auto-new";
+							};
+					  }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Apply a Claude-improved flow grouping to a project. Used by
+			 * both mobile + web Improve flows after the user pastes
+			 * Claude's JSON back into Capture. Backend updates the
+			 * orchestrator's manifest in one transaction so the view's
+			 * next listProjects/snapServerStatus reflects the new tree.
+			 */
+			applyFlowGrouping: {
+				params: {
+					slug: string;
+					groups: Array<{ id: string; name: string; routes: string[] }>;
+				};
+				response:
+					| { ok: true; flowsApplied: number; snapsMoved: number }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Diff the gallery's project list against the local registry and
+			 * archive any gallery-only entries. Used to reconcile after
+			 * test/duplicate projects pile up on the platform during
+			 * onboarding. Returns the list of slugs that were archived (so
+			 * the UI can confirm) and any errors per-slug.
+			 *
+			 * `mode: "preview"` returns the diff WITHOUT archiving, so the
+			 * UI can show a confirm step before the destructive action.
+			 */
+			/**
+			 * Crawl a web base URL to discover internal routes. Used by the
+			 * web wizard's Phase 2 to give the user a preview of what
+			 * flows will get auto-created before they commit. Bun-side
+			 * fetch (no CORS), parses <a href> + canonical/og link tags,
+			 * follows same-origin links one level deep. Returns absolute
+			 * paths relative to the base URL's pathname. Best-effort:
+			 * SPAs without server-rendered links return just "/". User
+			 * always has the option to skip discovery and start with a
+			 * blank flow tree.
+			 */
+			discoverWebRoutes: {
+				params: {
+					baseUrl: string;
+					/** Max routes to return — defaults to 50 so the UI stays usable. */
+					limit?: number;
+				};
+				response:
+					| {
+							ok: true;
+							baseUrl: string;
+							routes: Array<{ path: string; title?: string }>;
+							/** Routes that were skipped (off-origin, hash-only, etc.) for transparency. */
+							skipped: number;
+							/** "html" / "spa" — if just "/" was found and the page looks SPA-y, hint at that. */
+							hint: "ok" | "spa" | "auth-wall" | "blocked";
+					  }
+					| { ok: false; error: string };
+			};
+			cleanupUnsyncedProjects: {
+				params: {
+					platformUrl: string;
+					setupToken: string;
+					platform?: "web" | "ios" | "android";
+					mode: "preview" | "archive";
+				};
+				response:
+					| {
+							ok: true;
+							galleryOnly: Array<{ slug: string; name: string; platform: string }>;
+							archived: string[];
+							errors: Array<{ slug: string; error: string }>;
+					  }
+					| { ok: false; error: string };
 			};
 		};
 		messages: {

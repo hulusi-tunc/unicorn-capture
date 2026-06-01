@@ -12,9 +12,68 @@
  * automate the repair, we leave a `manualHint` instead.
  */
 
+import { execSync } from "node:child_process";
 import { findProjectForBridge } from "./init";
 import { fingerprintRepo, type RepoFingerprint } from "./repo-fingerprint";
 import { getSnapBridgeVersion } from "./snap-bridge-version";
+
+/**
+ * Probe whether the iOS Simulator has at least one booted device.
+ * Returns the booted device name when found so the Doctor panel can
+ * show "iPhone 15 Pro is booted" instead of just a checkmark. macOS
+ * only — gracefully returns `{ booted: false, deviceName: null }` on
+ * other platforms. Sync because `xcrun simctl` returns in <50ms.
+ */
+export function probeSimulatorBooted(): {
+	booted: boolean;
+	deviceName: string | null;
+} {
+	try {
+		const out = execSync("xcrun simctl list devices booted -j", {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 3000,
+		});
+		const parsed = JSON.parse(out) as {
+			devices?: Record<string, Array<{ name?: string; state?: string }>>;
+		};
+		const all = Object.values(parsed.devices ?? {}).flat();
+		const booted = all.find((d) => d?.state === "Booted");
+		return { booted: !!booted, deviceName: booted?.name ?? null };
+	} catch {
+		return { booted: false, deviceName: null };
+	}
+}
+
+/**
+ * Probe whether an Expo / Metro dev server is reachable on the standard
+ * port. We hit `/status` (Expo CLI's healthcheck) — when it responds
+ * with the magic header, the bundler is alive. Anything else (no
+ * response, wrong header) means the dev server isn't running. Default
+ * port 8081; designers using a custom `--port` see a false negative
+ * here, which is acceptable for v1 — they can launch from Capture and
+ * skip the question entirely.
+ */
+export async function probeExpoDevServer(): Promise<{ running: boolean }> {
+	try {
+		const ctrl = new AbortController();
+		const timer = setTimeout(() => ctrl.abort(), 1500);
+		const resp = await fetch("http://localhost:8081/status", {
+			signal: ctrl.signal,
+		}).finally(() => clearTimeout(timer));
+		const text = await resp.text().catch(() => "");
+		// Metro's /status replies with "packager-status:running" in body.
+		return { running: resp.ok && text.includes("running") };
+	} catch {
+		return { running: false };
+	}
+}
+
+export interface RuntimeProbes {
+	bridgeConnected: boolean;
+	simulator: { booted: boolean; deviceName: string | null };
+	expoDevServer: { running: boolean };
+}
 
 export type CheckStatus = "ok" | "warn" | "error";
 
@@ -31,6 +90,9 @@ export interface DoctorCheck {
 			| "merge-flows"
 			| "install-view-shot"
 			| "open-layout"
+			| "boot-simulator"
+			| "launch-expo"
+			| "reconnect-bridge"
 			| "manual";
 		label: string;
 		/** Path that the manual action points to (e.g. layout file to open). */
@@ -56,8 +118,9 @@ export interface DoctorReport {
  */
 export function runDoctor(
 	slug: string,
-	bridgeConnected: boolean,
+	probes: RuntimeProbes,
 ): { ok: true; report: DoctorReport } | { ok: false; error: string } {
+	const { bridgeConnected, simulator, expoDevServer } = probes;
 	const project = findProjectForBridge(slug);
 	if (!project) return { ok: false, error: `No project with slug "${slug}"` };
 	const repoPath = project.repoPath;
@@ -81,14 +144,48 @@ export function runDoctor(
 	const suggested = getSnapBridgeVersion();
 	const checks: DoctorCheck[] = [];
 
-	// 1. Bridge connectivity
+	// Runtime checks come first — they're the ones the designer
+	// can actually act on when Snap is greyed out. Repo / version
+	// checks are about pre-existing config that rarely needs daily
+	// attention.
+
+	// R1. iOS Simulator booted
+	checks.push({
+		id: "simulator-booted",
+		label: "iOS Simulator running",
+		status: simulator.booted ? "ok" : "error",
+		detail: simulator.booted
+			? `Booted: ${simulator.deviceName ?? "unknown device"}.`
+			: "No booted simulator detected. Open Simulator.app or click Fix to boot the last-used device.",
+		fixAction: simulator.booted
+			? undefined
+			: { kind: "boot-simulator", label: "Boot simulator" },
+	});
+
+	// R2. Expo dev server reachable
+	checks.push({
+		id: "expo-running",
+		label: "Expo / Metro dev server reachable",
+		status: expoDevServer.running ? "ok" : "error",
+		detail: expoDevServer.running
+			? "Dev server is responding on http://localhost:8081."
+			: "No dev server on http://localhost:8081. Click Launch to start `expo start` from this repo, or run it yourself.",
+		fixAction: expoDevServer.running
+			? undefined
+			: { kind: "launch-expo", label: "Launch Expo" },
+	});
+
+	// R3. Bridge connectivity — the snap-bridge WebSocket
 	checks.push({
 		id: "bridge-connected",
-		label: "snap-bridge WebSocket connected",
+		label: "snap-bridge connected to your app",
 		status: bridgeConnected ? "ok" : "warn",
 		detail: bridgeConnected
 			? "Bridge is online and pinging back."
-			: "No active connection. Make sure your RN app is running in the iOS sim and `installSnapBridge` is called in _layout.",
+			: "No active connection. If your app is running, click Reconnect to restart Capture's WebSocket listener.",
+		fixAction: bridgeConnected
+			? undefined
+			: { kind: "reconnect-bridge", label: "Reconnect" },
 	});
 
 	// 2. snap-bridge version pin

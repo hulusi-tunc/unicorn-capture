@@ -21,6 +21,42 @@ import { dirname, join, relative } from "node:path";
 export { getSnapBridgeRef as SNAP_BRIDGE_INSTALL_REF_FN } from "./snap-bridge-version";
 import { getSnapBridgeRef } from "./snap-bridge-version";
 
+/**
+ * macOS GUI apps launched from Finder/Spotlight inherit a minimal
+ * `$PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) — they do NOT see homebrew,
+ * nvm, bun, volta, or anything else the user's terminal has set up.
+ * That makes every `spawn("npm", ...)` blow up with "Executable not
+ * found in $PATH" the moment a designer launches Capture from the
+ * dock.
+ *
+ * This helper returns an env with PATH augmented to include the
+ * locations real-world tools actually live in on macOS. Covers
+ * Apple-Silicon homebrew (`/opt/homebrew/bin`), Intel homebrew
+ * (`/usr/local/bin`), bun's default install (`~/.bun/bin`), volta,
+ * nvm's current symlink, and MacPorts. Doesn't try to source the
+ * user's `.zshrc` — that would handle exotic setups but adds 100ms
+ * to every spawn and breaks when the user's shell config has bugs.
+ */
+export function getAugmentedSpawnEnv(): NodeJS.ProcessEnv {
+	const base = { ...process.env };
+	const home = base.HOME ?? homedir();
+	const extras = [
+		"/opt/homebrew/bin", // Apple Silicon homebrew
+		"/opt/homebrew/sbin",
+		"/usr/local/bin", // Intel homebrew + system-installed node
+		"/usr/local/sbin",
+		`${home}/.bun/bin`, // bun's default install
+		`${home}/.volta/bin`, // volta
+		`${home}/.nvm/versions/node/current/bin`, // nvm with default symlink
+		"/opt/local/bin", // MacPorts
+		"/opt/local/sbin",
+	];
+	const existing = base.PATH ?? "";
+	const merged = [existing, ...extras].filter(Boolean).join(":");
+	base.PATH = merged;
+	return base;
+}
+
 export interface InitInputs {
 	repoPath: string;
 	slug: string;
@@ -578,6 +614,13 @@ export interface CaptureProjectEntry {
 	repoPath?: string;
 	rnAppDir?: string;
 	registeredAt: string;
+	/**
+	 * Web-only: the base URL the iframe loads when the user enters the
+	 * project. Mobile projects have no equivalent (they boot the iOS Sim
+	 * and load whatever Expo is serving). Persisted so the iframe URL
+	 * survives across Capture restarts.
+	 */
+	baseUrl?: string;
 }
 
 export function loadCaptureProjects(): CaptureProjectEntry[] {

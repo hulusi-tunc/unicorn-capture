@@ -11,25 +11,30 @@ import {
 } from "electrobun/bun";
 import type { RnSnapInfo, ScenarioRunnerRPC } from "../lib/rpc";
 import { validateDeviceConfig, validateScenario } from "../lib/schemas";
+import { probeExpoDevServer, probeSimulatorBooted, runDoctor } from "./doctor";
 import {
 	type CaptureProjectEntry,
+	createProjectOnPlatform,
 	findProjectForBridge,
+	getAugmentedSpawnEnv,
 	initProject,
 	loadCaptureProjects,
+	registerWithCapture,
 	removeCaptureProject,
 } from "./init";
 import {
-	type InstallPlan,
 	type InstallOutcome,
+	type InstallPlan,
 	runInstaller,
 } from "./installer";
 import { assembleCoreSteps } from "./installer-steps";
 import { fingerprintRepo } from "./repo-fingerprint";
-import { buildImprovePrompt } from "./snap-flows-improver";
-import { runDoctor } from "./doctor";
-import { buildVerifyStep } from "./verifier";
 import { captureRect } from "./screencapture";
 import { forwardTap, mirrorSimulator } from "./simulator";
+import {
+	buildImprovePrompt,
+	buildWebImprovePrompt,
+} from "./snap-flows-improver";
 import {
 	createSnapOrchestrator,
 	type SnapOrchestrator,
@@ -37,7 +42,9 @@ import {
 } from "./snap-orchestrator";
 import { startSnapServer } from "./snap-server";
 import { resolveSource } from "./sources";
-import { uploadSession } from "./upload";
+import { frameIdFromSnap, uploadSession } from "./upload";
+import { buildVerifyStep } from "./verifier";
+import { discoverWebRoutes } from "./web-route-discovery";
 
 const DBG_LOG = "/tmp/prisma-debug.log";
 const dbg = (m: string) => {
@@ -81,19 +88,104 @@ function screenshotsDir(): string {
 	return dir;
 }
 
-// Default RN snap output. Sticks the snaps inside the user's Documents so they
-// survive between runs and across app reinstalls.
+// Default RN snap output. ~/Library/Application Support is the standard macOS
+// per-user app data location — survives reinstalls, NOT iCloud-synced. The
+// old default at ~/Documents/UnicornCapture caused EPERM races on
+// manifest.json because iCloud Drive's FileProvider kept locking the file
+// during sync (and gave "Operation not permitted" on shell reads, broke
+// snap-server's image streaming, etc.). If the legacy ~/Documents path is
+// present and the Library path is empty, the legacy path is preferred so
+// existing sessions stay visible after the upgrade — move the contents to
+// Library/Application Support/UnicornCapture/ to fully escape iCloud.
 function snapOutDir(): string {
 	const env = process.env.SNAP_OUT;
 	if (env && env.length > 0) return resolve(env);
-	const dir = join(homedir(), "Documents", "UnicornCapture", "snaps");
-	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	return dir;
+	const libraryPath = join(
+		homedir(),
+		"Library",
+		"Application Support",
+		"UnicornCapture",
+		"snaps",
+	);
+	const legacyPath = join(homedir(), "Documents", "UnicornCapture", "snaps");
+	// Prefer legacy iff the new location is empty and legacy has data — gives
+	// the user one warm-up run after upgrade without losing their gallery.
+	if (existsSync(legacyPath) && !existsSync(libraryPath)) {
+		dbg(
+			`snapOutDir: using legacy path ${legacyPath} — move to ${libraryPath} to escape iCloud`,
+		);
+		return legacyPath;
+	}
+	if (!existsSync(libraryPath)) mkdirSync(libraryPath, { recursive: true });
+	return libraryPath;
 }
 
 const SNAP_PORT = Number(process.env.SNAP_PORT ?? 9876);
-const snapServer = startSnapServer({ port: SNAP_PORT, log: dbg });
 let snapOrch: SnapOrchestrator | null = null;
+const snapServer = startSnapServer({
+	port: SNAP_PORT,
+	log: dbg,
+	// /tour/snap routes through the orchestrator. We always return a non-
+	// null backend so the first tour snap auto-initialises the orchestrator
+	// — otherwise the tour would have to wait for the user to manually
+	// open iossim mode before the orchestrator exists.
+	tourBackend: () => ({
+		snap: async (opts) => {
+			const orch = await ensureOrchestrator();
+			const r = await orch.snap({
+				projectId: opts?.projectId,
+				forceFlowId: opts?.flowId,
+			});
+			if (!r.ok) return { ok: false, error: r.error };
+			return {
+				ok: true,
+				record: r.record as unknown as Record<string, unknown>,
+			};
+		},
+	}),
+	webExtBackend: () => ({
+		listWebProjects: async () => {
+			return loadCaptureProjects()
+				.filter((p) => p.platform === "web")
+				.map((p) => ({
+					slug: p.slug,
+					name: p.name ?? p.slug,
+					baseUrl: p.baseUrl,
+				}));
+		},
+		listFlowsForProject: async (projectId) => {
+			const orch = await ensureOrchestrator();
+			return orch
+				.listFlows()
+				.filter((f) => f.projectId === projectId)
+				.map((f) => ({
+					id: f.id,
+					name: f.name,
+					parentFlowId: f.parentFlowId,
+				}));
+		},
+		recordSnap: async (opts) => {
+			const orch = await ensureOrchestrator();
+			try {
+				const r = await orch.recordWebSnap({
+					projectId: opts.projectId,
+					url: opts.url,
+					title: opts.title,
+					fullPage: opts.fullPage,
+					flowId: opts.flowId,
+					pngBytes: opts.pngBytes,
+				});
+				return {
+					ok: true,
+					record: r.record as unknown as Record<string, unknown>,
+					placement: r.placement as unknown as Record<string, unknown>,
+				};
+			} catch (err) {
+				return { ok: false, error: (err as Error).message };
+			}
+		},
+	}),
+});
 async function ensureOrchestrator(): Promise<SnapOrchestrator> {
 	if (!snapOrch) {
 		snapOrch = await createSnapOrchestrator({
@@ -108,7 +200,9 @@ async function ensureOrchestrator(): Promise<SnapOrchestrator> {
 			void snapOrch!
 				.ingestDeclaration(projectId, decl)
 				.catch((err) =>
-					dbg(`ingestDeclaration(${projectId}) failed: ${(err as Error).message}`),
+					dbg(
+						`ingestDeclaration(${projectId}) failed: ${(err as Error).message}`,
+					),
 				);
 		});
 	}
@@ -162,14 +256,23 @@ async function runWrapScreenForProject(
 			error: `RN app dir "${rnAppDir ?? "<unset>"}" doesn't exist on disk.`,
 		};
 	}
-	const pmRoot = project.repoPath && existsSync(project.repoPath)
-		? project.repoPath
-		: rnAppDir;
-	const localBin = resolveLocalBridgeBin(rnAppDir, pmRoot, "snap-bridge-wrap-screen");
+	const pmRoot =
+		project.repoPath && existsSync(project.repoPath)
+			? project.repoPath
+			: rnAppDir;
+	const localBin = resolveLocalBridgeBin(
+		rnAppDir,
+		pmRoot,
+		"snap-bridge-wrap-screen",
+	);
 	const cmd = localBin ?? "npx";
 	const baseArgs = localBin
 		? []
-		: ["-y", "github:hulusi-tunc/snap-bridge#v0.7.0", "snap-bridge-wrap-screen"];
+		: [
+				"-y",
+				"github:hulusi-tunc/snap-bridge#v0.9.0",
+				"snap-bridge-wrap-screen",
+			];
 	const cliArgs: string[] = [];
 	if (mode === "list") cliArgs.push("--list");
 	else cliArgs.push(route);
@@ -179,7 +282,7 @@ async function runWrapScreenForProject(
 	return new Promise((resolve) => {
 		const child = spawn(cmd, args, {
 			cwd: rnAppDir,
-			env: process.env,
+			env: getAugmentedSpawnEnv(),
 		});
 		let stdout = "";
 		let stderr = "";
@@ -220,11 +323,15 @@ async function runPmCommand(
 	project: CaptureProjectEntry,
 	args: string[],
 ): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
-	const pmRoot = project.repoPath && existsSync(project.repoPath)
-		? project.repoPath
-		: project.rnAppDir;
+	const pmRoot =
+		project.repoPath && existsSync(project.repoPath)
+			? project.repoPath
+			: project.rnAppDir;
 	if (!pmRoot) {
-		return { ok: false, error: `No package manager root for "${project.slug}"` };
+		return {
+			ok: false,
+			error: `No package manager root for "${project.slug}"`,
+		};
 	}
 	// Pick package manager from lockfile presence — quick + correct enough
 	// for the common cases. `bun` projects keep bun.lock, pnpm has
@@ -237,7 +344,7 @@ async function runPmCommand(
 				? "yarn"
 				: "npm";
 	return new Promise((resolve) => {
-		const child = spawn(pm, args, { cwd: pmRoot, env: process.env });
+		const child = spawn(pm, args, { cwd: pmRoot, env: getAugmentedSpawnEnv() });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (d: Buffer) => {
@@ -263,6 +370,145 @@ async function runPmCommand(
 }
 
 /**
+ * Boot the iOS Simulator app — opens Simulator.app, which restores the
+ * last-used device. Equivalent to clicking the dock icon, but
+ * triggerable from Capture's Doctor panel so the user doesn't have to
+ * leave the app. Returns quickly; `open` is fire-and-forget.
+ */
+async function bootSimulator(): Promise<
+	{ ok: true; output: string } | { ok: false; error: string }
+> {
+	return new Promise((resolve) => {
+		const child = spawn("open", ["-a", "Simulator"], { env: getAugmentedSpawnEnv() });
+		let stderr = "";
+		child.stderr.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+		child.on("error", (err: Error) => {
+			resolve({ ok: false, error: `Failed to open Simulator: ${err.message}` });
+		});
+		child.on("close", (code: number | null) => {
+			if (code !== 0) {
+				resolve({
+					ok: false,
+					error: (stderr || `Exited with code ${code}`).trim(),
+				});
+				return;
+			}
+			resolve({
+				ok: true,
+				output:
+					"Opening Simulator. Your last-used device should boot in a few seconds.",
+			});
+		});
+	});
+}
+
+/**
+ * Spawn `<pm> expo start` inside the project's RN app directory.
+ * Detaches the child so killing Capture doesn't kill the dev server,
+ * and waits briefly to confirm the process didn't die immediately
+ * (which would indicate a missing dep or wrong cwd). Logs are written
+ * to the captured project's debug stream so the Doctor panel can hint
+ * "see Console for output" without us building a log viewer in v1.
+ */
+async function launchExpoForProject(
+	slug: string,
+): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
+	const project = findProjectForBridge(slug);
+	if (!project) {
+		return { ok: false, error: `No project with slug "${slug}"` };
+	}
+	const cwd =
+		project.rnAppDir && existsSync(project.rnAppDir)
+			? project.rnAppDir
+			: project.repoPath;
+	if (!cwd || !existsSync(cwd)) {
+		return {
+			ok: false,
+			error: `No workspace on disk for "${slug}" (looked for ${project.rnAppDir ?? project.repoPath})`,
+		};
+	}
+	// Pick package manager the same way runPmCommand does so `npx expo`
+	// goes through the project's own toolchain (avoids "expo not found"
+	// when the global is missing).
+	const pm = existsSync(join(cwd, "bun.lock"))
+		? "bun"
+		: existsSync(join(cwd, "pnpm-lock.yaml"))
+			? "pnpm"
+			: existsSync(join(cwd, "yarn.lock"))
+				? "yarn"
+				: "npm";
+	const execArgs =
+		pm === "npm" || pm === "yarn" ? ["expo", "start"] : ["expo", "start"];
+	const launcher = pm === "npm" ? "npx" : pm;
+	const args = pm === "npm" ? execArgs : ["x", ...execArgs];
+	return new Promise((resolve) => {
+		try {
+			const child = spawn(launcher, args, {
+				cwd,
+				env: { ...getAugmentedSpawnEnv(), FORCE_COLOR: "0" },
+				detached: true,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			let earlyStderr = "";
+			child.stderr.on("data", (d: Buffer) => {
+				earlyStderr += d.toString();
+				dbg(`[expo] ${d.toString().trimEnd()}`);
+			});
+			child.stdout.on("data", (d: Buffer) => {
+				dbg(`[expo] ${d.toString().trimEnd()}`);
+			});
+			child.on("error", (err: Error) => {
+				resolve({
+					ok: false,
+					error: `Failed to spawn ${launcher}: ${err.message}`,
+				});
+			});
+			// Hold the RPC for 2.5s — long enough to catch immediate
+			// failures (wrong cwd, expo not installed) but short enough
+			// that the user gets a snappy ack when it works. After that
+			// we unref so Capture can exit without killing Expo.
+			const settle = setTimeout(() => {
+				if (child.exitCode !== null) {
+					resolve({
+						ok: false,
+						error:
+							earlyStderr.trim() ||
+							`expo exited with code ${child.exitCode}`,
+					});
+					return;
+				}
+				try {
+					child.unref();
+				} catch {}
+				resolve({
+					ok: true,
+					output: `Started \`${launcher} ${args.join(" ")}\` in ${cwd}. Bridge should connect once the app loads.`,
+				});
+			}, 2500);
+			child.once("exit", () => {
+				clearTimeout(settle);
+				// If we got here before the settle fired, it's a fast
+				// failure; the timer handler also covers this but we
+				// race-resolve to surface the error sooner.
+				resolve({
+					ok: false,
+					error:
+						earlyStderr.trim() ||
+						`expo exited with code ${child.exitCode ?? "unknown"}`,
+				});
+			});
+		} catch (err) {
+			resolve({
+				ok: false,
+				error: `Failed to launch Expo: ${(err as Error).message}`,
+			});
+		}
+	});
+}
+
+/**
  * Run `<pm> exec snap-flows-scan` inside a project's RN app directory
  * and report what came back. Used by the "↻ Refresh flows" button so
  * the user doesn't have to drop into a terminal after every route
@@ -272,7 +518,13 @@ async function runSnapFlowsScanForProject(
 	slug: string,
 	mode: "merge" | "regenerate" = "merge",
 ): Promise<
-	| { ok: true; output: string; flowsFound?: number; screensFound?: number; mode: "merge" | "regenerate" }
+	| {
+			ok: true;
+			output: string;
+			flowsFound?: number;
+			screensFound?: number;
+			mode: "merge" | "regenerate";
+	  }
 	| { ok: false; error: string }
 > {
 	const project = findProjectForBridge(slug);
@@ -286,9 +538,10 @@ async function runSnapFlowsScanForProject(
 	}
 	// Lockfile + `packageManager` field usually live at the repo root,
 	// not inside `apps/mobile/`. Fall back to rnAppDir if no repo path.
-	const pmRoot = project.repoPath && existsSync(project.repoPath)
-		? project.repoPath
-		: rnAppDir;
+	const pmRoot =
+		project.repoPath && existsSync(project.repoPath)
+			? project.repoPath
+			: rnAppDir;
 	// Pick the right invocation. Prefer the locally-installed bin (no
 	// network). Fall back to `npx -y github:...` so an outdated/missing
 	// snap-bridge install doesn't error the user out — they get a working
@@ -297,13 +550,13 @@ async function runSnapFlowsScanForProject(
 	const cmd = localBin ?? "npx";
 	const baseArgs = localBin
 		? []
-		: ["-y", "github:hulusi-tunc/snap-bridge#v0.7.0", "snap-flows-scan"];
+		: ["-y", "github:hulusi-tunc/snap-bridge#v0.9.0", "snap-flows-scan"];
 	const args = mode === "merge" ? [...baseArgs, "--merge"] : baseArgs;
 
 	return new Promise((resolve) => {
 		const child = spawn(cmd, args, {
 			cwd: rnAppDir,
-			env: process.env,
+			env: getAugmentedSpawnEnv(),
 		});
 		let stdout = "";
 		let stderr = "";
@@ -323,8 +576,7 @@ async function runSnapFlowsScanForProject(
 			if (code !== 0) {
 				resolve({
 					ok: false,
-					error:
-						(stderr || stdout || `Exited with code ${code}`).trim(),
+					error: (stderr || stdout || `Exited with code ${code}`).trim(),
 				});
 				return;
 			}
@@ -351,18 +603,30 @@ async function runSnapFlowsScanForProject(
  *
  * Returns counts so the UI can show "synced N, failed M".
  */
+/** One skipped frame surfaced back to the UI summary modal. */
+export interface PushSkipped {
+	projectId: string;
+	image: string;
+	reason: "missing-file" | "read-error";
+}
+
 async function pushAll(
 	orch: SnapOrchestrator,
 	projectSlug?: string,
 	message?: string,
-): Promise<{ synced: number; failed: number; errors: string[] }> {
+): Promise<{
+	synced: number;
+	failed: number;
+	errors: string[];
+	skipped: PushSkipped[];
+}> {
 	const allSnaps = orch.listAllSnaps();
 	// Scope to a single project when a slug is provided — keeps replace=true
 	// from accidentally wiping a different app's frames.
 	const all = projectSlug
 		? allSnaps.filter((s) => s.projectId === projectSlug)
 		: allSnaps;
-	if (all.length === 0) return { synced: 0, failed: 0, errors: [] };
+	if (all.length === 0) return { synced: 0, failed: 0, errors: [], skipped: [] };
 
 	const flows = orch.listFlows();
 	const byProject = new Map<string, SnapRecord[]>();
@@ -375,6 +639,7 @@ async function pushAll(
 	let synced = 0;
 	let failed = 0;
 	const errors: string[] = [];
+	const skipped: PushSkipped[] = [];
 
 	for (const [projectId, snaps] of byProject) {
 		const project = findProjectForBridge(projectId);
@@ -402,15 +667,31 @@ async function pushAll(
 			message: message?.trim() || undefined,
 			log: dbg,
 		});
+		// Tag each skipped image with its project so the summary modal
+		// can group by project when the user has multiple onboarded.
+		for (const s of result.skipped) {
+			skipped.push({ projectId, image: s.image, reason: s.reason });
+		}
 		const now = new Date().toISOString();
 		if (result.ok) {
 			synced += snaps.length;
+			// Map gallery-returned `frameId → url` so we can hand each snap
+			// its own `remoteImageUrl`. The lookup is by frameIdFromSnap
+			// to match the same id the upload manifest used.
+			const urlByFrameId = new Map<string, string>();
+			for (const f of result.frames) urlByFrameId.set(f.frameId, f.url);
 			for (const s of snaps) {
-				await orch.markUploaded(s.sessionId, s.sequence, {
-					ok: true,
-					buildId: result.buildId,
-					uploadedAt: now,
-				});
+				const remoteImageUrl = urlByFrameId.get(frameIdFromSnap(s));
+				await orch.markUploaded(
+					s.sessionId,
+					s.sequence,
+					{
+						ok: true,
+						buildId: result.buildId,
+						uploadedAt: now,
+					},
+					remoteImageUrl ? { remoteImageUrl } : undefined,
+				);
 			}
 		} else {
 			failed += snaps.length;
@@ -425,7 +706,23 @@ async function pushAll(
 		}
 	}
 
-	return { synced, failed, errors };
+	// Catch-up prune: snaps from prior sessions whose 7-day cache window
+	// has passed get their local PNGs reclaimed now. Snaps marked uploaded
+	// in THIS push have evictAt = now + 7d so they're safe. Best-effort —
+	// any error is logged but doesn't fail the push.
+	try {
+		const { deleted, freedBytes } = await orch.pruneEvicted({
+			projectId: projectSlug,
+		});
+		if (deleted > 0) {
+			const mb = (freedBytes / (1024 * 1024)).toFixed(1);
+			dbg(`prune-evicted: reclaimed ${deleted} local PNG(s) (${mb}MB)`);
+		}
+	} catch (err) {
+		dbg(`prune-evicted failed: ${(err as Error).message}`);
+	}
+
+	return { synced, failed, errors, skipped };
 }
 
 async function uploadOne(
@@ -471,6 +768,7 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 		sequence: s.sequence,
 		projectId: s.projectId,
 		route: s.route,
+		displayName: s.displayName,
 		navStack: s.navStack,
 		stateHash: s.stateHash,
 		capturedAt: s.capturedAt,
@@ -481,8 +779,16 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 		remoteImageUrl: s.remoteImageUrl,
 		uploaded: s.uploaded
 			? s.uploaded.ok
-				? { ok: true, buildId: s.uploaded.buildId ?? "" }
-				: { ok: false, error: s.uploaded.error ?? "unknown" }
+				? {
+						ok: true,
+						buildId: s.uploaded.buildId ?? "",
+						uploadedAt: s.uploaded.uploadedAt,
+					}
+				: {
+						ok: false,
+						error: s.uploaded.error ?? "unknown",
+						uploadedAt: s.uploaded.uploadedAt,
+					}
 			: undefined,
 		position: s.position,
 		flowId: s.flowId,
@@ -491,6 +797,7 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 			capturedAt: v.capturedAt,
 			navStack: v.navStack,
 		})),
+		fullPage: s.fullPage,
 	};
 }
 // Boot the orchestrator eagerly so the view's first status poll has a sessionId.
@@ -598,7 +905,107 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					flows: orch.listFlows(),
 				};
 			},
-			performSnap: async ({ projectSlug, mode }) => {
+			getBridgeRoute: async ({ projectSlug }) => {
+				// Lightweight pull of the connected bridge's current
+				// route. Powers the topbar "Bridge sees: /foo" live
+				// indicator so designers know what would be captured
+				// before they click Snap. Returns null when no bridge
+				// is connected for that project.
+				if (snapServer.clientCount() === 0) return { ok: true, route: null };
+				try {
+					const resp = await snapServer.requestState({
+						projectId: projectSlug,
+						timeoutMs: 1500,
+					});
+					return {
+						ok: true,
+						route: resp.snapshot.route,
+						stateHash: resp.snapshot.stateHash ?? "",
+					};
+				} catch {
+					// Bridge dropped between polls or didn't reply in time —
+					// non-fatal, just report null so the indicator dims.
+					return { ok: true, route: null };
+				}
+			},
+			runProjectTour: async ({ projectSlug }) => {
+				// Drive a declarative tour through every declared screen for
+				// this project: navigate → wait for ready → snap → repeat.
+				// Returns aggregated results. Reuses snapServer's existing
+				// goto/ready WS protocol via requestNavigate. Skips flows
+				// without declared screens (auto-flows have no canonical
+				// route list to walk).
+				const orch = await ensureOrchestrator();
+				if (snapServer.clientCount() === 0) {
+					return {
+						ok: false,
+						error:
+							"No snap-bridge connected. Boot your app first, then re-run the tour.",
+					};
+				}
+				const flows = orch
+					.listFlows()
+					.filter(
+						(f) => f.projectId === projectSlug && f.screens && f.screens.length > 0,
+					);
+				const visits: Array<{
+					flowName: string;
+					screenName: string;
+					route: string;
+					ok: boolean;
+					error?: string;
+				}> = [];
+				for (const flow of flows) {
+					for (const screen of flow.screens ?? []) {
+						if (screen.hidden) continue;
+						try {
+							await snapServer.requestNavigate({
+								route: screen.route,
+								projectId: projectSlug,
+								timeoutMs: 20000,
+							});
+							const snap = await orch.snap({
+								projectId: projectSlug,
+								mode: "auto",
+								forceFlowId: flow.id,
+							});
+							if (!snap.ok) {
+								visits.push({
+									flowName: flow.name,
+									screenName: screen.name,
+									route: screen.route,
+									ok: false,
+									error: snap.error,
+								});
+							} else {
+								visits.push({
+									flowName: flow.name,
+									screenName: screen.name,
+									route: screen.route,
+									ok: true,
+								});
+							}
+						} catch (err) {
+							visits.push({
+								flowName: flow.name,
+								screenName: screen.name,
+								route: screen.route,
+								ok: false,
+								error: (err as Error).message,
+							});
+						}
+					}
+				}
+				const succeeded = visits.filter((v) => v.ok).length;
+				return {
+					ok: true,
+					total: visits.length,
+					succeeded,
+					failed: visits.length - succeeded,
+					visits,
+				};
+			},
+			performSnap: async ({ projectSlug, mode, forceFlowId, forceScreen }) => {
 				const orch = await ensureOrchestrator();
 				if (snapServer.clientCount() === 0) {
 					return {
@@ -611,10 +1018,14 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				// currently selected in the sidebar — necessary when multiple
 				// RN apps are running at once (folleli + ovria). `mode` chooses
 				// between replace-existing-slot ("auto") and force-new-card
-				// ("variant"); see RPC type for details.
+				// ("variant"); see RPC type for details. `forceFlowId` /
+				// `forceScreen` override placement when the user captures from
+				// a flow or focused-screen context.
 				const r = await orch.snap({
 					projectId: projectSlug,
 					mode: mode ?? "auto",
+					forceFlowId,
+					forceScreen,
 				});
 				if (!r.ok) return { ok: false, error: r.error };
 				// Manual upload only — the user pushes when they're ready.
@@ -641,6 +1052,31 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				const orch = await ensureOrchestrator();
 				const ok = await orch.renameFlow(flowId, name);
 				return ok ? { ok: true } : { ok: false, error: "Flow not found" };
+			},
+			reparentFlow: async ({ flowId, newParentId }) => {
+				const orch = await ensureOrchestrator();
+				const ok = await orch.reparentFlow(flowId, newParentId);
+				return ok
+					? { ok: true }
+					: {
+							ok: false,
+							error: "Invalid reparent (cycle, missing flow, or cross-project)",
+						};
+			},
+			renameScreen: async ({ flowId, declaredId, name }) => {
+				const orch = await ensureOrchestrator();
+				const ok = await orch.renameScreen(flowId, declaredId, name);
+				return ok ? { ok: true } : { ok: false, error: "Screen not found" };
+			},
+			hideScreen: async ({ flowId, declaredId }) => {
+				const orch = await ensureOrchestrator();
+				const ok = await orch.hideScreen(flowId, declaredId);
+				return ok ? { ok: true } : { ok: false, error: "Screen not found" };
+			},
+			renameSnap: async ({ sessionId, sequence, name }) => {
+				const orch = await ensureOrchestrator();
+				const ok = await orch.renameSnap(sessionId, sequence, name);
+				return ok ? { ok: true } : { ok: false, error: "Snap not found" };
 			},
 			moveSnapsToFlow: async ({ snapIds, toFlowId }) => {
 				const orch = await ensureOrchestrator();
@@ -687,13 +1123,79 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				const orch = await ensureOrchestrator();
 				return pushAll(orch, projectSlug, message);
 			},
+			clearPushedSnaps: async ({ projectSlug }) => {
+				const orch = await ensureOrchestrator();
+				const r = await orch.pruneEvicted({
+					force: true,
+					projectId: projectSlug,
+				});
+				return { ok: true, deleted: r.deleted, freedBytes: r.freedBytes };
+			},
+			syncFromGallery: async ({ projectSlug }) => {
+				const project = findProjectForBridge(projectSlug);
+				const uploadUrl = project?.uploadUrl ?? process.env.SNAP_UPLOAD_URL;
+				const token = project?.projectToken ?? process.env.SNAP_UPLOAD_TOKEN;
+				if (!uploadUrl || !token) {
+					return {
+						ok: false,
+						error: `No gallery target configured for "${projectSlug}".`,
+					};
+				}
+				// Derive manifest endpoint from the upload endpoint we already
+				// have on file. They live as siblings under /api/captures/.
+				const manifestUrl = uploadUrl.replace(/\/upload(\?.*)?$/, "/manifest");
+				try {
+					const res = await fetch(manifestUrl, {
+						headers: { authorization: `Bearer ${token}` },
+					});
+					if (!res.ok) {
+						const txt = await res.text().catch(() => "");
+						return {
+							ok: false,
+							error: `Gallery returned ${res.status}: ${txt.slice(0, 240)}`,
+						};
+					}
+					const body = (await res.json()) as {
+						app: { id: string; slug: string };
+						flows: Array<{
+							id: string;
+							name: string;
+							parentFlowId?: string;
+							position?: number;
+						}>;
+						frames: Array<{
+							id: string;
+							flow_id: string;
+							flow_name: string;
+							frame_name: string;
+							latest_image_url: string | null;
+							flow_position?: number | null;
+							frame_position?: number | null;
+							created_at: string;
+						}>;
+					};
+					const orch = await ensureOrchestrator();
+					const result = await orch.mergeRemoteManifest({
+						projectId: body.app.slug,
+						flows: body.flows,
+						frames: body.frames,
+					});
+					return {
+						ok: true,
+						flowsAdded: result.flowsAdded,
+						flowsRemoved: result.flowsRemoved,
+						framesAdded: result.framesAdded,
+						framesSkipped: result.framesSkipped,
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
 			uploadPending: async ({ force }) => {
 				const orch = await ensureOrchestrator();
 				// `force` re-pushes every snap regardless of its previous
 				// uploaded state — useful after wiping the platform side.
-				const pending = force
-					? orch.listAllSnaps()
-					: orch.listPendingUploads();
+				const pending = force ? orch.listAllSnaps() : orch.listPendingUploads();
 				if (pending.length === 0) {
 					return { ok: true, uploaded: 0, failed: 0, errors: [] };
 				}
@@ -712,9 +1214,10 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						});
 					} else {
 						failed += 1;
-						const errMsg = result?.ok === false
-							? result.error
-							: "no upload target configured";
+						const errMsg =
+							result?.ok === false
+								? result.error
+								: "no upload target configured";
 						errors.push(`#${snap.sequence} ${snap.route}: ${errMsg}`);
 						await orch.markUploaded(snap.sessionId, snap.sequence, {
 							ok: false,
@@ -782,9 +1285,11 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 							// Pipe each step transition out to the wizard's
 							// stepper UI. The proxy is typed via the `messages`
 							// channel in lib/rpc.ts.
-							(rpc.send as unknown as {
-								onInitProgress: (m: typeof msg) => void;
-							}).onInitProgress(msg);
+							(
+								rpc.send as unknown as {
+									onInitProgress: (m: typeof msg) => void;
+								}
+							).onInitProgress(msg);
 						} catch (err) {
 							dbg(`onInitProgress send failed: ${(err as Error).message}`);
 						}
@@ -801,7 +1306,42 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 			},
 			improveSnapFlows: async ({ slug }) => {
 				try {
-					const r = buildImprovePrompt(slug);
+					const project = findProjectForBridge(slug);
+					if (!project) throw new Error(`No project "${slug}"`);
+					let r: ReturnType<typeof buildImprovePrompt>;
+					if (project.platform === "web") {
+						// Web projects have no snap-flows.ts — the improver source
+						// is the orchestrator's flow tree + the routes captured so
+						// far. Walk the manifest, build a WebFlowGroup list, and
+						// hand it to the web-flavor prompt builder.
+						const orch = await ensureOrchestrator();
+						const flows = orch.listFlows().filter((f) => f.projectId === slug);
+						const allSnaps = orch
+							.listAllSnaps()
+							.filter((s) => s.projectId === slug);
+						const routesByFlow = new Map<string, Set<string>>();
+						for (const s of allSnaps) {
+							const set = routesByFlow.get(s.flowId) ?? new Set<string>();
+							set.add(s.route);
+							routesByFlow.set(s.flowId, set);
+						}
+						const groups = flows.map((f) => ({
+							id: f.id,
+							name: f.name,
+							routes: [...(routesByFlow.get(f.id) ?? [])].sort(),
+						}));
+						r = buildWebImprovePrompt(slug, groups);
+					} else {
+						r = buildImprovePrompt(slug);
+					}
+					try {
+						Utils.clipboardWriteText(r.clipboardPayload);
+					} catch (clipErr) {
+						return {
+							ok: false,
+							error: `Built prompt but native clipboard write failed: ${(clipErr as Error).message}`,
+						};
+					}
 					return { ok: true, ...r };
 				} catch (err) {
 					return { ok: false, error: (err as Error).message };
@@ -817,7 +1357,10 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				await Promise.all(
 					local.map(async (entry) => {
 						try {
-							const baseUrl = entry.uploadUrl.replace(/\/api\/captures\/upload$/, "");
+							const baseUrl = entry.uploadUrl.replace(
+								/\/api\/captures\/upload$/,
+								"",
+							);
 							const statusUrl = `${baseUrl}/api/projects/${encodeURIComponent(entry.slug)}/archive`;
 							const resp = await fetch(statusUrl, {
 								method: "GET",
@@ -856,7 +1399,10 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					return { ok: true };
 				}
 				try {
-					const baseUrl = entry.uploadUrl.replace(/\/api\/captures\/upload$/, "");
+					const baseUrl = entry.uploadUrl.replace(
+						/\/api\/captures\/upload$/,
+						"",
+					);
 					const archiveUrl = `${baseUrl}/api/projects/${encodeURIComponent(slug)}/archive`;
 					const resp = await fetch(archiveUrl, {
 						method: "POST",
@@ -895,12 +1441,21 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				const bridgeConnected = snapServer
 					.clients()
 					.some((c) => c.projectId === slug);
-				const r = runDoctor(slug, bridgeConnected);
+				const [simulator, expoDevServer] = await Promise.all([
+					Promise.resolve(probeSimulatorBooted()),
+					probeExpoDevServer(),
+				]);
+				const r = runDoctor(slug, {
+					bridgeConnected,
+					simulator,
+					expoDevServer,
+				});
 				return r;
 			},
 			doctorAutoFix: async ({ slug, kind }) => {
 				const project = findProjectForBridge(slug);
-				if (!project) return { ok: false, error: `No project with slug "${slug}"` };
+				if (!project)
+					return { ok: false, error: `No project with slug "${slug}"` };
 				const rnAppDir = project.rnAppDir;
 				if (!rnAppDir || !existsSync(rnAppDir)) {
 					return {
@@ -919,13 +1474,41 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					return { ok: false, error: r.error };
 				}
 				if (kind === "bump-snap-bridge") {
-					return runPmCommand(project, ["install", "--save-dev", `github:hulusi-tunc/snap-bridge#v0.7.0`]);
+					return runPmCommand(project, [
+						"install",
+						"--save-dev",
+						`github:hulusi-tunc/snap-bridge#v0.7.0`,
+					]);
 				}
 				if (kind === "install-view-shot") {
-					return runPmCommand(project, ["install", "--save-dev", "react-native-view-shot"]);
+					return runPmCommand(project, [
+						"install",
+						"--save-dev",
+						"react-native-view-shot",
+					]);
+				}
+				if (kind === "boot-simulator") {
+					return bootSimulator();
+				}
+				if (kind === "launch-expo") {
+					return launchExpoForProject(slug);
+				}
+				if (kind === "reconnect-bridge") {
+					snapServer.forceReconnect();
+					return {
+						ok: true,
+						output:
+							"Closed existing bridge connections. Your app should reconnect within ~3 seconds.",
+					};
 				}
 				return { ok: false, error: `Unknown fix: ${kind}` };
 			},
+			launchExpo: async ({ slug }) => launchExpoForProject(slug),
+			reconnectBridge: async () => {
+				snapServer.forceReconnect();
+				return { ok: true };
+			},
+			bootSimulator: async () => bootSimulator(),
 			initProject: async (input) => {
 				const result = await initProject(input);
 				if (!result.ok) {
@@ -944,6 +1527,264 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					layoutInjection: result.layoutInjection,
 					steps: result.steps,
 				};
+			},
+			createWebProject: async (input: {
+				name: string;
+				slug?: string;
+				baseUrl: string;
+				platformUrl: string;
+				setupToken: string;
+				seedFlows?: Array<{ id: string; name: string; routes: string[] }>;
+			}) => {
+				const { name, slug, baseUrl, platformUrl, setupToken, seedFlows } =
+					input;
+				const slugify = (s: string): string =>
+					s
+						.toLowerCase()
+						.replace(/[^a-z0-9]+/g, "-")
+						.replace(/^-|-$/g, "")
+						.slice(0, 48);
+				const trimmedName = name.trim();
+				const trimmedBaseUrl = baseUrl.trim();
+				if (!trimmedName) return { ok: false, error: "Name is required." };
+				if (!trimmedBaseUrl)
+					return { ok: false, error: "Base URL is required." };
+				try {
+					new URL(trimmedBaseUrl);
+				} catch {
+					return { ok: false, error: "Base URL is not a valid URL." };
+				}
+				const computedSlug =
+					slug?.trim() ||
+					slugify(trimmedName) ||
+					`web-${Date.now().toString(36).slice(-6)}`;
+				if (!/^[a-z0-9][a-z0-9-]*$/.test(computedSlug)) {
+					return {
+						ok: false,
+						error: "Slug must be lowercase kebab-case (a–z, 0–9, hyphen).",
+					};
+				}
+				try {
+					const platform = await createProjectOnPlatform({
+						url: platformUrl,
+						setupToken,
+						slug: computedSlug,
+						name: trimmedName,
+						platform: "web",
+					});
+					const uploadUrl = `${platformUrl.replace(/\/$/, "")}/api/captures/upload`;
+					registerWithCapture({
+						slug: platform.slug,
+						name: platform.name,
+						platform: "web",
+						projectToken: platform.projectToken,
+						uploadUrl,
+						baseUrl: trimmedBaseUrl,
+						registeredAt: new Date().toISOString(),
+					});
+					// Seed the orchestrator with the wizard's auto-grouped
+					// flows so the sidebar shows a populated tree on first
+					// entry. Snaps captured later auto-match into these
+					// flows by route, so the user's first snap on /sign-in
+					// lands in "Auth" instead of triggering a new flow.
+					let seededFlows: number | undefined;
+					if (seedFlows && seedFlows.length > 0) {
+						try {
+							const orch = await ensureOrchestrator();
+							const r = await orch.applyFlowGrouping(platform.slug, seedFlows);
+							seededFlows = r.flowsApplied;
+						} catch (err) {
+							// Best-effort: failure here just means the project
+							// starts with an empty flow tree, snaps auto-create
+							// flows lazily. Surface in the response so the UI
+							// can show a non-fatal warning if it cares.
+							console.error(
+								`createWebProject seed flows failed: ${(err as Error).message}`,
+							);
+						}
+					}
+					return {
+						ok: true,
+						slug: platform.slug,
+						projectToken: platform.projectToken,
+						restored: platform.restored,
+						reused: platform.reused,
+						seededFlows,
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			performWebSnap: async ({ slug, url, tempImagePath, title }) => {
+				const project = findProjectForBridge(slug);
+				if (!project) return { ok: false, error: `No project "${slug}"` };
+				try {
+					const orch = await ensureOrchestrator();
+					const r = await orch.recordWebSnap({
+						projectId: slug,
+						url,
+						tempImagePath,
+						title,
+					});
+					return {
+						ok: true,
+						snap: snapToInfo(r.record, orch.outDir),
+						route: r.route,
+						placement: r.placement,
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			applyFlowGrouping: async ({ slug, groups }) => {
+				const project = findProjectForBridge(slug);
+				if (!project) return { ok: false, error: `No project "${slug}"` };
+				try {
+					const orch = await ensureOrchestrator();
+					const r = await orch.applyFlowGrouping(slug, groups);
+					return { ok: true, ...r };
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			discoverWebRoutes: async ({ baseUrl, limit }) => {
+				dbg(`discoverWebRoutes start: ${baseUrl} (limit=${limit ?? 50})`);
+				try {
+					const r = await discoverWebRoutes(baseUrl, limit ?? 50);
+					dbg(
+						`discoverWebRoutes done: hint=${r.hint} routes=${r.routes.length} skipped=${r.skipped}`,
+					);
+					return { ok: true, ...r };
+				} catch (err) {
+					dbg(`discoverWebRoutes failed: ${(err as Error).message}`);
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			cleanupUnsyncedProjects: async ({
+				platformUrl,
+				setupToken,
+				platform,
+				mode,
+			}) => {
+				try {
+					const base = platformUrl.replace(/\/$/, "");
+					const listUrl = platform
+						? `${base}/api/projects?platform=${encodeURIComponent(platform)}`
+						: `${base}/api/projects`;
+					const res = await fetch(listUrl, {
+						headers: { authorization: `Bearer ${setupToken}` },
+					});
+					if (!res.ok) {
+						const txt = await res.text().catch(() => "");
+						return {
+							ok: false,
+							error: `Gallery returned ${res.status}: ${txt.slice(0, 240)}`,
+						};
+					}
+					const body = (await res.json()) as {
+						projects: Array<{
+							slug: string;
+							name: string;
+							platform: string;
+							archived_at: string | null;
+						}>;
+					};
+					const local = loadCaptureProjects();
+					const localSlugs = new Set(local.map((p) => p.slug));
+					// Skip already-archived rows — they're effectively gone from
+					// the user's perspective and re-archiving is a no-op anyway.
+					const galleryOnly = body.projects.filter(
+						(p) => !p.archived_at && !localSlugs.has(p.slug),
+					);
+					if (mode === "preview") {
+						return {
+							ok: true,
+							galleryOnly: galleryOnly.map((p) => ({
+								slug: p.slug,
+								name: p.name,
+								platform: p.platform,
+							})),
+							archived: [],
+							errors: [],
+						};
+					}
+					const archived: string[] = [];
+					const errors: Array<{ slug: string; error: string }> = [];
+					// Archive endpoint is per-project-token authed. Since the
+					// local registry doesn't have tokens for gallery-only
+					// projects, we use the setup-token-authed admin route
+					// pattern instead. There isn't a bulk archive endpoint —
+					// it's per-slug DELETE on the [slug]/archive route via
+					// per-project token. We can't archive without that token.
+					//
+					// Workaround: re-create the project locally first (idempotent
+					// — POST /api/projects with the same slug returns the
+					// existing token), then archive via that token, then remove
+					// locally to keep the user's desktop clean.
+					for (const p of galleryOnly) {
+						try {
+							// Re-fetch token via idempotent POST.
+							const tokenRes = await fetch(`${base}/api/projects`, {
+								method: "POST",
+								headers: {
+									authorization: `Bearer ${setupToken}`,
+									"content-type": "application/json",
+								},
+								body: JSON.stringify({
+									slug: p.slug,
+									name: p.name,
+									platform: p.platform,
+								}),
+							});
+							if (!tokenRes.ok) {
+								const txt = await tokenRes.text().catch(() => "");
+								errors.push({
+									slug: p.slug,
+									error: `Token fetch ${tokenRes.status}: ${txt.slice(0, 120)}`,
+								});
+								continue;
+							}
+							const tokenBody = (await tokenRes.json()) as {
+								projectToken: string;
+							};
+							const archiveRes = await fetch(
+								`${base}/api/projects/${encodeURIComponent(p.slug)}/archive`,
+								{
+									method: "POST",
+									headers: {
+										authorization: `Bearer ${tokenBody.projectToken}`,
+									},
+								},
+							);
+							if (!archiveRes.ok) {
+								const txt = await archiveRes.text().catch(() => "");
+								errors.push({
+									slug: p.slug,
+									error: `Archive ${archiveRes.status}: ${txt.slice(0, 120)}`,
+								});
+								continue;
+							}
+							archived.push(p.slug);
+						} catch (err) {
+							errors.push({
+								slug: p.slug,
+								error: (err as Error).message,
+							});
+						}
+					}
+					return {
+						ok: true,
+						galleryOnly: galleryOnly.map((p) => ({
+							slug: p.slug,
+							name: p.name,
+							platform: p.platform,
+						})),
+						archived,
+						errors,
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
 			},
 		},
 		messages: {},

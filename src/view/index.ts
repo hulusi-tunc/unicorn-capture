@@ -87,6 +87,14 @@ interface AppState {
 		 * project's snaps mixed together (only useful for debugging).
 		 */
 		selectedProjectSlug: string | null;
+		/**
+		 * Live route the bridge most recently reported for the selected
+		 * project. Drives the topbar "Bridge sees: /foo" pill so the
+		 * designer knows what would be captured before clicking Snap.
+		 * Null when no bridge is connected or polling hasn't returned
+		 * yet; empty string is treated like null.
+		 */
+		currentRoute: string | null;
 	};
 }
 
@@ -151,6 +159,7 @@ const state = new Store<AppState>({
 		selectedIdx: -1,
 		registry: [],
 		selectedProjectSlug: null,
+		currentRoute: null,
 	},
 });
 
@@ -1467,7 +1476,18 @@ function removeWebSnap(id: string): void {
 
 async function doWebSnap(): Promise<void> {
 	if (!webRefs) return;
+	const slug = state.get().rn.selectedProjectSlug;
+	if (!slug) {
+		log("Web snap: no project selected — open a project first.", "warn");
+		return;
+	}
 	const iframe = webRefs.iframe;
+	// Scroll the iframe fully into view before snap so captureRect can
+	// grab the whole 1440×900 surface even when the Capture window is
+	// narrower (the wrap scrolls but the iframe is rendered at full
+	// size). Without this, off-screen edges return blank pixels.
+	iframe.scrollIntoView({ block: "start", inline: "start" });
+	await new Promise((r) => setTimeout(r, 50));
 	const rect = iframe.getBoundingClientRect();
 	if (rect.width <= 0 || rect.height <= 0) {
 		log("Web snap: iframe isn't sized yet — load a URL first.", "warn");
@@ -1476,7 +1496,6 @@ async function doWebSnap(): Promise<void> {
 	const x = window.screenX + rect.left;
 	const y =
 		window.screenY + rect.top + (window.outerHeight - window.innerHeight);
-	const id = `web-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(36)}`;
 	const url = webRefs.urlInput.value.trim() || iframe.src || "(no url)";
 	let title: string | undefined;
 	try {
@@ -1484,33 +1503,89 @@ async function doWebSnap(): Promise<void> {
 	} catch {
 		// Cross-origin iframe; can't read title. That's fine.
 	}
+	const tempName = `web-tmp-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(36)}`;
 	const r = await req.captureRect({
 		x: Math.max(0, x),
 		y: Math.max(0, y),
 		width: rect.width,
 		height: rect.height,
-		name: `web-${id}`,
+		name: tempName,
 	});
 	if (!r.ok) {
 		log(`Web snap failed: ${r.error}`, "error");
 		return;
 	}
-	const snap: WebSnapRecord = {
-		id,
+	const recorded = await req.performWebSnap({
+		slug,
 		url,
+		tempImagePath: r.path as string,
 		title,
-		capturedAt: new Date().toISOString(),
-		imagePath: r.path as string,
-	};
-	appendWebSnap(snap);
-	log(`✓ Web snap captured — ${url}`, "success");
+	});
+	if (!recorded.ok) {
+		log(`Web snap failed: ${recorded.error}`, "error");
+		return;
+	}
+	// Push the new snap into rn.snaps so the sidebar count + library tab
+	// update immediately. Auto-created flow is ingested via a manifest
+	// re-pull at the end so the sidebar shows it on the first snap of a
+	// new route prefix.
+	state.set((cur) => ({
+		...cur,
+		rn: { ...cur.rn, snaps: [...cur.rn.snaps, recorded.snap] },
+	}));
+	log(
+		`✓ Snapped #${recorded.snap.sequence} ${recorded.route} → Placed in ${recorded.placement.flowName}${recorded.placement.screenName ? ` → ${recorded.placement.screenName}` : ""}`,
+		"success",
+	);
+	// Re-pull the flow list from the orchestrator — the snap may have
+	// auto-created a new flow (first time the path prefix was seen).
+	try {
+		const status = await req.snapServerStatus({});
+		state.set((cur) => ({
+			...cur,
+			rn: { ...cur.rn, flows: status.flows },
+		}));
+	} catch {
+		// Ignore — sidebar may show a 1-tick-stale flow tree until the
+		// next state pump.
+	}
 }
 
 function renderWebLibrary(refs: WebRefs): void {
 	const grid = refs.libraryGrid;
-	const list = loadWebSnaps();
+	const s = state.get();
+	const slug = s.rn.selectedProjectSlug;
 	grid.replaceChildren();
-	if (list.length === 0) {
+	if (!slug) {
+		const empty = ce("div", "web-library-empty");
+		const h = ce("div", "web-library-empty-hint");
+		h.textContent = "Open a web project to see its library.";
+		empty.append(h);
+		grid.appendChild(empty);
+		return;
+	}
+	const snaps = s.rn.snaps.filter((sn) => sn.projectId === slug);
+	const projectFlows = s.rn.flows.filter((f) => f.projectId === slug);
+
+	// Overview header at the top of the Library — flow count + "+ New flow"
+	// button, mirroring mobile. Sits above all the per-flow sections.
+	const overview = ce("div", "web-library-overview");
+	const overviewLeft = ce("div", "web-library-overview-text");
+	const overviewTitle = ce("h2", "web-library-overview-title");
+	overviewTitle.textContent = "All flows";
+	const overviewSub = ce("p", "web-library-overview-sub");
+	const totalFrames = snaps.length;
+	overviewSub.textContent = `${projectFlows.length} flow${projectFlows.length === 1 ? "" : "s"} · ${totalFrames} frame${totalFrames === 1 ? "" : "s"}`;
+	overviewLeft.append(overviewTitle, overviewSub);
+	const newFlowBtn = ce("button", "btn btn-secondary btn-sm");
+	newFlowBtn.type = "button";
+	newFlowBtn.textContent = "+ New flow";
+	newFlowBtn.title = "Create an empty flow";
+	newFlowBtn.addEventListener("click", () => void doCreateFlow());
+	overview.append(overviewLeft, newFlowBtn);
+	grid.appendChild(overview);
+
+	if (snaps.length === 0 && projectFlows.length === 0) {
 		const empty = ce("div", "web-library-empty");
 		const i = ce("div", "web-library-empty-icon");
 		i.appendChild(icon("image", { size: 28, strokeWidth: 1.5 }));
@@ -1518,35 +1593,492 @@ function renderWebLibrary(refs: WebRefs): void {
 		t.textContent = "No snaps yet";
 		const h = ce("div", "web-library-empty-hint");
 		h.textContent =
-			"Switch to Live, load a URL and press Snap to start building your library.";
+			"Open the page in Chrome, click the Unicorn Capture extension, and snap.";
 		empty.append(i, t, h);
 		grid.appendChild(empty);
 		return;
 	}
-	for (const s of list) {
-		const card = ce("div", "web-library-card");
-		const thumb = ce("img", "web-library-thumb");
-		thumb.src = toFileUrl(s.imagePath);
-		thumb.alt = s.title ?? s.url;
-		thumb.loading = "lazy";
-		const meta = ce("div", "web-library-meta");
-		const title = ce("div", "web-library-title");
-		title.textContent = s.title || hostnameOf(s.url);
-		const url = ce("div", "web-library-url");
-		url.textContent = s.url;
-		url.title = s.url;
-		const time = ce("div", "web-library-time");
-		time.textContent = new Date(s.capturedAt).toLocaleString();
-		meta.append(title, url, time);
-		const del = ce("button", "web-library-del");
-		del.type = "button";
-		del.title = "Delete";
-		del.setAttribute("aria-label", `Delete snap ${s.url}`);
-		del.textContent = "×";
-		del.addEventListener("click", () => removeWebSnap(s.id));
-		card.append(thumb, meta, del);
-		grid.appendChild(card);
+	// Build the hierarchical group tree so sub-flows render NESTED inside
+	// their parent section (matches mobile). Without this, sub-flows show
+	// up as separate top-level sections and the parent/child relationship
+	// is invisible.
+	const groups = groupSnapsByFlow(snaps, projectFlows);
+	const renderGroup = (
+		group: RnFlowGroup,
+		parentContainer: HTMLElement,
+		depth: number,
+	): void => {
+		const flowId = group.flow.id;
+		const bucket = group.snaps;
+		const section = ce("section", "web-library-section");
+		if (depth > 0) section.classList.add("is-sub");
+		section.dataset.flowId = flowId;
+		const header = ce("div", "web-library-section-head");
+		const flowName =
+			group.flow.name ??
+			(flowId === "__unassigned__" ? "Unassigned" : flowId);
+		const name = ce("h4", "web-library-section-title");
+		name.textContent = flowName;
+		// Editable for real flows — Unassigned bucket isn't a real flow so
+		// it has no row in the manifest to rename.
+		if (flowId !== "__unassigned__") {
+			name.contentEditable = "plaintext-only";
+			name.spellcheck = false;
+			name.title = "Click to rename this flow — Enter saves, Esc cancels";
+			name.addEventListener("focus", () => {
+				name.classList.add("editing");
+				const sel = window.getSelection();
+				if (sel) {
+					const range = document.createRange();
+					range.selectNodeContents(name);
+					sel.removeAllRanges();
+					sel.addRange(range);
+				}
+			});
+			name.addEventListener("blur", () => {
+				name.classList.remove("editing");
+				const next = name.textContent?.trim() ?? "";
+				if (!next || next === flowName) {
+					name.textContent = flowName;
+					return;
+				}
+				void doRenameFlow(flowId, next);
+			});
+			name.addEventListener("keydown", (ev) => {
+				if (ev.key === "Enter") {
+					ev.preventDefault();
+					name.blur();
+				} else if (ev.key === "Escape") {
+					ev.preventDefault();
+					name.textContent = flowName;
+					name.blur();
+				}
+			});
+		}
+		const count = ce("span", "web-library-section-count");
+		count.textContent = String(bucket.length);
+		header.append(name, count);
+
+		const headerActions = ce("div", "web-library-section-actions");
+		if (flowId !== "__unassigned__") {
+			const subFlowBtn = ce("button", "btn btn-ghost btn-sm");
+			subFlowBtn.type = "button";
+			subFlowBtn.textContent = "+ Sub-flow";
+			subFlowBtn.title = `Create a sub-flow inside "${flowName}"`;
+			subFlowBtn.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				void doCreateSubFlow(flowId);
+			});
+			headerActions.appendChild(subFlowBtn);
+
+			const deleteFlowBtn = ce("button", "btn btn-ghost btn-sm web-library-section-delete");
+			deleteFlowBtn.type = "button";
+			deleteFlowBtn.title = "Delete this flow (snaps move to Unassigned)";
+			deleteFlowBtn.textContent = "Delete";
+			deleteFlowBtn.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				void doDeleteFlow(flowId, flowName, bucket.length);
+			});
+			headerActions.appendChild(deleteFlowBtn);
+		}
+		header.appendChild(headerActions);
+		section.appendChild(header);
+
+		const flowGrid = ce("div", "web-library-section-grid");
+		// Section is the cross-flow drop target. Dragging a card from
+		// another section here moves it under this flow via the existing
+		// moveSnapsToFlow RPC (mobile uses the same backend for grid
+		// drags). Highlight on dragenter, commit on drop.
+		// stopPropagation is critical for nested sub-flow sections — without
+		// it, a drop on a child section bubbles to its parent and the
+		// parent's drop handler immediately re-moves the snap back to the
+		// parent flow.
+		section.addEventListener("dragover", (ev) => {
+			if (!ev.dataTransfer?.types.includes("application/x-web-snap")) return;
+			ev.preventDefault();
+			ev.stopPropagation();
+			ev.dataTransfer.dropEffect = "move";
+			section.classList.add("is-drop-target");
+		});
+		section.addEventListener("dragleave", (ev) => {
+			if (ev.target === section || ev.currentTarget === ev.target) {
+				section.classList.remove("is-drop-target");
+			}
+		});
+		section.addEventListener("drop", (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			section.classList.remove("is-drop-target");
+			const payload = ev.dataTransfer?.getData("application/x-web-snap");
+			if (!payload) return;
+			try {
+				const { sessionId, sequence } = JSON.parse(payload) as {
+					sessionId: string;
+					sequence: number;
+				};
+				void doMoveWebSnapToFlow(sessionId, sequence, flowId);
+			} catch {}
+		});
+
+		const flowSnaps = bucket;
+		for (const sn of flowSnaps) {
+			const card = ce("button", "web-library-card");
+			card.type = "button";
+			if (sn.fullPage) card.classList.add("is-full-page");
+			if (freshSnapKeysThisRender.has(snapKey(sn))) {
+				card.classList.add("is-fresh");
+				window.setTimeout(() => card.classList.remove("is-fresh"), 950);
+			}
+			card.draggable = true;
+			card.dataset.sessionId = sn.sessionId;
+			card.dataset.sequence = String(sn.sequence);
+
+			card.addEventListener("dragstart", (ev) => {
+				if (!ev.dataTransfer) return;
+				ev.dataTransfer.effectAllowed = "move";
+				ev.dataTransfer.setData(
+					"application/x-web-snap",
+					JSON.stringify({
+						sessionId: sn.sessionId,
+						sequence: sn.sequence,
+					}),
+				);
+				dragSrc = {
+					flowId,
+					sessionId: sn.sessionId,
+					sequence: sn.sequence,
+				};
+				card.classList.add("is-dragging");
+			});
+			card.addEventListener("dragend", () => {
+				dragSrc = null;
+				card.classList.remove("is-dragging");
+				for (const el of grid.querySelectorAll(
+					".is-drop-target, .drop-before, .drop-after",
+				)) {
+					el.classList.remove(
+						"is-drop-target",
+						"drop-before",
+						"drop-after",
+					);
+				}
+			});
+
+			// Card-level drop target: insert before/after this card within
+			// the flow (or move across flows with reorder). Stops propagation
+			// so the section's append-on-drop doesn't double-fire.
+			card.addEventListener("dragover", (ev) => {
+				if (!dragSrc) return;
+				if (!ev.dataTransfer?.types.includes("application/x-web-snap")) {
+					return;
+				}
+				ev.preventDefault();
+				ev.stopPropagation();
+				ev.dataTransfer.dropEffect = "move";
+				// Horizontal split (matches mobile + the grid's left-to-right
+				// flow) — left half drops before this card, right half after.
+				const rect = card.getBoundingClientRect();
+				const before = ev.clientX - rect.left < rect.width / 2;
+				for (const el of grid.querySelectorAll(".drop-before, .drop-after")) {
+					if (el !== card) el.classList.remove("drop-before", "drop-after");
+				}
+				card.classList.toggle("drop-before", before);
+				card.classList.toggle("drop-after", !before);
+			});
+			card.addEventListener("dragleave", (ev) => {
+				if (ev.target === card) {
+					card.classList.remove("drop-before", "drop-after");
+				}
+			});
+			card.addEventListener("drop", (ev) => {
+				if (!dragSrc) return;
+				ev.preventDefault();
+				ev.stopPropagation();
+				const before = card.classList.contains("drop-before");
+				card.classList.remove("drop-before", "drop-after");
+				const targetKey = `${sn.sessionId}#${sn.sequence}`;
+				const srcKey = `${dragSrc.sessionId}#${dragSrc.sequence}`;
+				if (targetKey === srcKey && dragSrc.flowId === flowId) return;
+				handleStripDrop(
+					flowId,
+					{ snap: sn, before },
+					flowSnaps,
+				);
+			});
+
+			if (sn.fullPage) {
+				const badge = ce("div", "web-library-badge");
+				badge.textContent = "FULL PAGE";
+				card.appendChild(badge);
+			}
+
+			// Thumbnail: standard viewport snaps render as a 16:10 cover-cropped
+			// img. Full-page snaps wrap the natural-size img in a 16:10 scroll
+			// container so the card stays the same height as its siblings —
+			// users scroll inside the thumbnail to preview the long page, or
+			// click for the lightbox with the full image.
+			const thumb = ce("img", "web-library-thumb");
+			thumb.src = snapImageSrcFromInfo(sn);
+			thumb.alt = sn.route;
+			thumb.loading = "lazy";
+			thumb.addEventListener("error", () => {
+				thumb.style.display = "none";
+				card.classList.add("is-missing");
+				card.title =
+					"Screenshot file missing on disk — click × to remove this stale snap";
+			});
+			let thumbHost: HTMLElement = thumb;
+			if (sn.fullPage) {
+				const scroll = ce("div", "web-library-thumb-scroll");
+				scroll.appendChild(thumb);
+				// Wheel-scrolling the inner container would normally bubble and
+				// also scroll the library grid. Stop bubbling so the user can
+				// preview the long page without scrolling the whole library.
+				scroll.addEventListener("wheel", (ev) => ev.stopPropagation());
+				thumbHost = scroll;
+			}
+
+			// "Updated" badge — shown when re-snap added a version since the
+			// user last opened this slot's lightbox. Matches the mobile UX so
+			// designers spot fresh work without scanning timestamps.
+			const versionCount = (sn.versions?.length ?? 0) + 1;
+			const seenKey = `prisma:seen:${sn.projectId}:${sn.sessionId}#${sn.sequence}`;
+			const seenCount = Number(readLocal(seenKey) || "0") || 0;
+			const isUpdated = versionCount > Math.max(seenCount, 1);
+			let updatedBadge: HTMLElement | null = null;
+			if (isUpdated) {
+				updatedBadge = ce("span", "web-library-updated");
+				updatedBadge.textContent = "Updated";
+				updatedBadge.title = `Re-snapped — ${versionCount} versions total.`;
+				card.appendChild(updatedBadge);
+			}
+
+			// Card-anywhere click opens the lightbox + clears the Updated
+			// badge. Skip when clicking the title (in-place rename), the
+			// delete button, or when the underlying file is missing.
+			card.style.cursor = "zoom-in";
+			card.addEventListener("click", (ev) => {
+				const target = ev.target as HTMLElement;
+				if (target.closest(".web-library-del")) return;
+				if (target.closest(".web-library-title")) return;
+				if (card.classList.contains("is-missing")) return;
+				writeLocal(seenKey, String(versionCount));
+				if (updatedBadge?.isConnected) updatedBadge.remove();
+				openWebSnapLightbox(sn);
+			});
+
+			const meta = ce("div", "web-library-meta");
+			const currentLabel = sn.displayName || sn.route;
+			const titleEl = ce("div", "web-library-title");
+			titleEl.textContent = currentLabel;
+			titleEl.contentEditable = "plaintext-only";
+			titleEl.spellcheck = false;
+			titleEl.title = "Click to rename — Enter saves, Esc cancels";
+			titleEl.draggable = false;
+			titleEl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+			titleEl.addEventListener("dragstart", (ev) => ev.preventDefault());
+			titleEl.addEventListener("click", (ev) => ev.stopPropagation());
+			titleEl.addEventListener("focus", () => {
+				titleEl.classList.add("editing");
+				const sel = window.getSelection();
+				if (sel) {
+					const range = document.createRange();
+					range.selectNodeContents(titleEl);
+					sel.removeAllRanges();
+					sel.addRange(range);
+				}
+			});
+			titleEl.addEventListener("blur", () => {
+				titleEl.classList.remove("editing");
+				const next = titleEl.textContent?.trim() ?? "";
+				if (next === currentLabel) return;
+				void doRenameSnap(sn.sessionId, sn.sequence, next);
+			});
+			titleEl.addEventListener("keydown", (ev) => {
+				if (ev.key === "Enter") {
+					ev.preventDefault();
+					titleEl.blur();
+				} else if (ev.key === "Escape") {
+					ev.preventDefault();
+					titleEl.textContent = currentLabel;
+					titleEl.blur();
+				}
+			});
+
+			const url = ce("div", "web-library-url");
+			url.textContent = `#${sn.sequence}`;
+			const time = ce("div", "web-library-time");
+			time.textContent = new Date(sn.capturedAt).toLocaleString();
+			const status = ce("div", "web-library-status");
+			if (!sn.uploaded || sn.uploaded.ok === false) {
+				status.textContent = "• not pushed";
+				status.classList.add("is-pending");
+			} else {
+				status.textContent = "• pushed";
+				status.classList.add("is-ok");
+			}
+			meta.append(titleEl, url, time, status);
+
+			const del = ce("button", "web-library-del");
+			del.type = "button";
+			del.title = "Delete snap";
+			del.setAttribute("aria-label", `Delete snap ${sn.route}`);
+			del.textContent = "×";
+			del.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				void doDeleteWebSnap(sn.sessionId, sn.sequence);
+			});
+			card.append(thumbHost, meta, del);
+			flowGrid.appendChild(card);
+		}
+		section.appendChild(flowGrid);
+		if (group.children.length > 0) {
+			const subWrap = ce("div", "web-library-subs");
+			for (const child of group.children) {
+				renderGroup(child, subWrap, depth + 1);
+			}
+			section.appendChild(subWrap);
+		}
+		parentContainer.appendChild(section);
+	};
+
+	for (const g of groups) renderGroup(g, grid, 0);
+}
+
+function openWebSnapLightbox(sn: RnSnapInfo): void {
+	// Strip any existing lightbox so re-clicking doesn't stack overlays.
+	for (const old of document.querySelectorAll(".web-snap-lightbox")) {
+		old.remove();
 	}
+	const backdrop = ce("div", "web-snap-lightbox");
+	const close = () => backdrop.remove();
+	backdrop.addEventListener("click", (ev) => {
+		if (ev.target === backdrop) close();
+	});
+	const onKey = (ev: KeyboardEvent) => {
+		if (ev.key === "Escape") {
+			close();
+			document.removeEventListener("keydown", onKey);
+		}
+	};
+	document.addEventListener("keydown", onKey);
+
+	const stage = ce("div", "web-snap-lightbox-stage");
+	const header = ce("div", "web-snap-lightbox-header");
+	const title = ce("div", "web-snap-lightbox-title");
+	title.textContent = sn.displayName ?? sn.route;
+	const sub = ce("div", "web-snap-lightbox-sub");
+	sub.textContent = `#${sn.sequence} · ${new Date(sn.capturedAt).toLocaleString()}${sn.fullPage ? " · full page" : ""}`;
+	header.append(title, sub);
+	const closeBtn = ce("button", "web-snap-lightbox-close");
+	closeBtn.type = "button";
+	closeBtn.setAttribute("aria-label", "Close");
+	closeBtn.textContent = "×";
+	closeBtn.addEventListener("click", close);
+
+	const scroll = ce("div", "web-snap-lightbox-scroll");
+	const img = ce("img", "web-snap-lightbox-img");
+	img.src = snapImageSrcFromInfo(sn);
+	img.alt = sn.route;
+	// Show a clear placeholder when the source file is missing or zero-sized
+	// (deleted on disk, prune evicted it, smoke-test stub, etc). Otherwise
+	// the lightbox renders a blank box and looks broken.
+	const showMissing = (reason: string): void => {
+		img.style.display = "none";
+		const placeholder = ce("div", "web-snap-lightbox-missing");
+		const t = ce("div", "web-snap-lightbox-missing-title");
+		t.textContent = "Image missing";
+		const h = ce("div", "web-snap-lightbox-missing-hint");
+		h.textContent = reason;
+		placeholder.append(t, h);
+		scroll.appendChild(placeholder);
+	};
+	img.addEventListener("error", () =>
+		showMissing("The PNG file is gone from disk — re-snap to refresh."),
+	);
+	img.addEventListener("load", () => {
+		if (img.naturalWidth < 8 || img.naturalHeight < 8) {
+			showMissing("This entry is a placeholder (no real screenshot bytes).");
+		}
+	});
+	scroll.appendChild(img);
+
+	stage.append(closeBtn, header, scroll);
+	backdrop.appendChild(stage);
+	document.body.appendChild(backdrop);
+}
+
+async function doMoveWebSnapToFlow(
+	sessionId: string,
+	sequence: number,
+	toFlowId: string,
+): Promise<void> {
+	const r = await req.moveSnapsToFlow({
+		snapIds: [{ sessionId, sequence }],
+		toFlowId,
+	});
+	if (!r.ok) {
+		log(`Move failed: ${r.error}`, "error");
+		return;
+	}
+	// Optimistic local update + re-pull from server to make sure flow
+	// counts settle on the right answer.
+	state.set((cur) => ({
+		...cur,
+		rn: {
+			...cur.rn,
+			snaps: cur.rn.snaps.map((s) =>
+				s.sessionId === sessionId && s.sequence === sequence
+					? ({ ...s, flowId: toFlowId } as typeof s)
+					: s,
+			),
+		},
+	}));
+	log(`→ Moved snap #${sequence} to "${toFlowId}"`, "info");
+}
+
+function snapImageSrcFromInfo(sn: { imagePath?: string; remoteImageUrl?: string }): string {
+	if (sn.imagePath) return toFileUrl(sn.imagePath);
+	if (sn.remoteImageUrl) return sn.remoteImageUrl;
+	return "";
+}
+
+async function doDeleteWebSnap(sessionId: string, sequence: number): Promise<void> {
+	const r = await req.deleteSnap({ sessionId, sequence });
+	if (!r.ok) {
+		log(`Delete failed: ${r.error}`, "error");
+		return;
+	}
+	state.set((cur) => ({
+		...cur,
+		rn: {
+			...cur.rn,
+			snaps: cur.rn.snaps.filter(
+				(s) => !(s.sessionId === sessionId && s.sequence === sequence),
+			),
+		},
+	}));
+	log(`🗑 Deleted snap #${sequence}`, "info");
+}
+
+/**
+ * Resize the iframe to a known device viewport. The CSS default is
+ * desktop 1440×900; tablet + mobile override via inline style so
+ * applyWebState doesn't fight the picker. Kept in JS rather than via
+ * CSS class so we don't have a 3-class permutation explosion to
+ * maintain — three constants, one width/height each.
+ */
+function applyDevicePreset(
+	iframe: HTMLIFrameElement,
+	preset: "desktop" | "tablet" | "mobile",
+): void {
+	const dims = {
+		desktop: { w: 1440, h: 900 },
+		tablet: { w: 768, h: 1024 },
+		mobile: { w: 375, h: 667 },
+	}[preset];
+	iframe.style.width = `${dims.w}px`;
+	iframe.style.height = `${dims.h}px`;
 }
 
 function hostnameOf(url: string): string {
@@ -1979,8 +2511,13 @@ theme.init();
 type ProjectType = "mobile" | "web";
 const projectTypeOf = (slug: string): ProjectType => {
 	const r = state.get().rn.registry.find((p) => p.slug === slug);
-	const raw = (r as unknown as { type?: string } | undefined)?.type;
-	return raw === "web" ? "web" : "mobile";
+	if (!r) return "mobile";
+	// Persisted projects use the canonical `platform` field. The legacy
+	// ad-hoc `type` is kept as a fallback for in-memory web stubs that
+	// were created before the wizard was wired up.
+	if (r.platform === "web") return "web";
+	const legacy = (r as unknown as { type?: string }).type;
+	return legacy === "web" ? "web" : "mobile";
 };
 const enterProject = (slug: string): void => {
 	const type = projectTypeOf(slug);
@@ -2245,9 +2782,58 @@ gtbPushBtn.title = "Upload pending snaps to the gallery platform";
 setBtnIcon(gtbPushBtn, "upload", "Push to web");
 gtbPushBtn.addEventListener("click", () => void doPushPending());
 
+const gtbSyncBtn = document.createElement("button");
+gtbSyncBtn.className = "btn btn-ghost mode-project";
+gtbSyncBtn.title = "Pull frames + flows from the gallery (use after disk loss / on a fresh machine)";
+setBtnIcon(gtbSyncBtn, "refresh-cw", "Sync");
+gtbSyncBtn.addEventListener("click", () => void doSyncFromGallery());
+
 // Split snap button: main button = default snap (auto = replace existing
 // slot), caret = dropdown with "Snap as variant" (force a new card on the
 // same slot, used for long pages or filter-state captures).
+const gtbTourBtn = document.createElement("button");
+gtbTourBtn.className = "btn btn-ghost mode-project";
+gtbTourBtn.title =
+	"Run a tour over every declared screen — Capture navigates and snaps each one automatically.";
+setBtnIcon(gtbTourBtn, "play", "Run tour");
+gtbTourBtn.addEventListener("click", () => void doRunTour());
+
+const gtbAutoSnapBtn = document.createElement("button");
+gtbAutoSnapBtn.className = "btn btn-ghost mode-project";
+gtbAutoSnapBtn.title =
+	"Auto-snap: when ON, Capture snaps every time you navigate to a new route in the simulator (1s settle delay).";
+setBtnIcon(gtbAutoSnapBtn, "zap", "Auto-snap: Off");
+const AUTO_SNAP_KEY = "capture:auto-snap-on";
+function isAutoSnapOn(): boolean {
+	return readLocal(AUTO_SNAP_KEY) === "1";
+}
+function setAutoSnapOn(on: boolean): void {
+	writeLocal(AUTO_SNAP_KEY, on ? "1" : "0");
+	setBtnIcon(
+		gtbAutoSnapBtn,
+		on ? "zap" : "zap-off",
+		on ? "Auto-snap: On" : "Auto-snap: Off",
+	);
+	gtbAutoSnapBtn.classList.toggle("is-active", on);
+	log(
+		on
+			? "Auto-snap ON — every new route gets captured automatically."
+			: "Auto-snap OFF — back to manual snaps.",
+		"info",
+	);
+}
+// Restore persisted state on boot (without firing the log toast).
+{
+	const on = isAutoSnapOn();
+	setBtnIcon(
+		gtbAutoSnapBtn,
+		on ? "zap" : "zap-off",
+		on ? "Auto-snap: On" : "Auto-snap: Off",
+	);
+	gtbAutoSnapBtn.classList.toggle("is-active", on);
+}
+gtbAutoSnapBtn.addEventListener("click", () => setAutoSnapOn(!isAutoSnapOn()));
+
 const gtbSnapGroup = document.createElement("div");
 gtbSnapGroup.className = "gtb-snap-group mode-project";
 const gtbSnapBtn = document.createElement("button");
@@ -2262,7 +2848,7 @@ gtbSnapCaret.setAttribute("aria-label", "Snap options");
 gtbSnapCaret.appendChild(icon("chevron-down", { size: 12 }));
 gtbSnapCaret.addEventListener("click", (ev) => {
 	ev.stopPropagation();
-	openSnapMenu(gtbSnapCaret);
+	openSnapMenu(gtbSnapCaret, undefined);
 });
 gtbSnapGroup.append(gtbSnapBtn, gtbSnapCaret);
 
@@ -2274,7 +2860,10 @@ gtbActions.append(
 	gtbThemeBtn,
 	gtbActionsSep,
 	gtbAddBtn,
+	gtbSyncBtn,
 	gtbPushBtn,
+	gtbAutoSnapBtn,
+	gtbTourBtn,
 	gtbSnapGroup,
 );
 
@@ -2290,7 +2879,10 @@ function onDocClickCloseSnap(ev: MouseEvent): void {
 	if (snapMenuOpen.contains(ev.target as Node)) return;
 	closeSnapMenu();
 }
-function openSnapMenu(anchor: HTMLElement): void {
+function openSnapMenu(
+	anchor: HTMLElement,
+	target?: { forceFlowId?: string },
+): void {
 	if (snapMenuOpen) {
 		closeSnapMenu();
 		return;
@@ -2326,18 +2918,18 @@ function openSnapMenu(anchor: HTMLElement): void {
 
 	menu.appendChild(
 		mkItem(
-			"Snap",
-			"Replace existing capture for this screen. Prior image goes into version history. Right model when redesigning.",
+			"Snap (replace)",
+			"Updates the current screen's card. The old image becomes a version in history. This is the right choice 95% of the time.",
 			"⌘⇧S",
-			() => void doSnap("auto"),
+			() => void doSnap("auto", target),
 		),
 	);
 	menu.appendChild(
 		mkItem(
-			"Snap as variant",
-			"Always create a NEW card on the same screen. Use for long pages (top/middle/bottom) or filter / state variants.",
+			"Snap as new card",
+			"Adds a second card for this same screen. Use when you want both side-by-side — different scroll positions, popup states, A/B variants.",
 			"⌘⇧V",
-			() => void doSnap("variant"),
+			() => void doSnap("variant", target),
 		),
 	);
 
@@ -2367,6 +2959,28 @@ state.subscribe((s) => {
 	gtbSnapCaret.disabled = r.clientCount === 0 || r.busy;
 	gtbSnapBtn.classList.toggle("is-busy", r.busy);
 	setBtnIcon(gtbSnapBtn, r.busy ? "loader" : "camera", r.busy ? "Capturing…" : "Snap");
+	// Tour button: only meaningful when bridge is connected for the
+	// active project AND we have at least one declared screen to visit.
+	{
+		const slugForTour = state.get().rn.selectedProjectSlug;
+		const declaredCount =
+			slugForTour
+				? r.flows
+						.filter((f) => f.projectId === slugForTour)
+						.reduce(
+							(sum, f) =>
+								sum + (f.screens?.filter((s) => !s.hidden).length ?? 0),
+							0,
+						)
+				: 0;
+		const tourReady =
+			!!slugForTour &&
+			r.projects.includes(slugForTour) &&
+			!r.busy &&
+			!r.pushing &&
+			declaredCount > 0;
+		gtbTourBtn.disabled = !tourReady;
+	}
 	const projectName =
 		(slug && r.registry.find((p) => p.slug === slug)?.name) || slug;
 
@@ -2375,12 +2989,21 @@ state.subscribe((s) => {
 		const projectIsConnected = r.projects.includes(slug);
 		gtbContextName.textContent = projectName ?? slug;
 		gtbContextDot.className = projectIsConnected ? "dot success" : "dot warn";
+		// When the bridge is connected and we know the live route, show
+		// it inline so designers see what would be captured before they
+		// click Snap. Falls back to "Connected" while the first poll is
+		// in flight (currentRoute null) or when polling failed.
+		const liveRoute = projectIsConnected ? r.currentRoute : null;
 		gtbContextPillLabel.textContent = projectIsConnected
-			? "Connected"
-			: "Waiting for snap-bridge…";
+			? liveRoute
+				? `Connected · ${liveRoute}`
+				: "Connected"
+			: "Bridge offline";
 		gtbContextPill.title = projectIsConnected
-			? `snap-bridge connected (port 9876)`
-			: `No snap-bridge yet. In your RN app's root layout, install @unicorn-studio/snap-bridge and call installSnapBridge({projectId: "${slug}"}). Listening on port 9876.`;
+			? liveRoute
+				? `Bridge sees: ${liveRoute}\nClick Snap to capture this screen.`
+				: `Connected to your app — ready to capture (port 9876)`
+			: `Your app isn't connected yet. Check that the iOS Simulator is running, your Expo dev server is up, and the app is loaded.\n\nDeveloper details: snap-bridge listens on port 9876 for projectId "${slug}".`;
 		gtbContextPill.classList.toggle("is-connected", projectIsConnected);
 	} else {
 		gtbContextName.textContent = "";
@@ -2690,6 +3313,29 @@ function buildDashboard(): DashRefs {
 		"Pick a project to capture from, or click + Add to onboard a new one.";
 	heading.append(headingTitle, headingSub);
 
+	// "Cleanup unsynced" — diffs the gallery against the local registry
+	// and archives anything on the gallery that this desktop doesn't
+	// know about. Helpful after onboarding when test projects pile up.
+	// Hidden behind a tiny ghost button so the dashboard's main affordance
+	// stays "+ Add", not "delete stuff".
+	const cleanupRow = ce("div", "dash-cleanup-row");
+	const cleanupBtn = ce("button", "btn btn-ghost btn-sm");
+	cleanupBtn.type = "button";
+	cleanupBtn.title =
+		"Diff gallery vs. desktop and archive any projects only on the gallery";
+	cleanupBtn.textContent = "Cleanup unsynced";
+	cleanupBtn.addEventListener("click", () => void doCleanupUnsynced(cleanupBtn));
+	const clearCacheBtn = ce("button", "btn btn-ghost btn-sm");
+	clearCacheBtn.type = "button";
+	clearCacheBtn.title =
+		"Delete local PNGs for snaps already pushed to the gallery. Cards keep their thumbnails via the cloud URL. Frees disk space without losing data.";
+	clearCacheBtn.textContent = "Clear cached snaps";
+	clearCacheBtn.addEventListener("click", () =>
+		void doClearPushedSnaps(clearCacheBtn),
+	);
+	cleanupRow.append(cleanupBtn, clearCacheBtn);
+	heading.appendChild(cleanupRow);
+
 	const cardsGrid = ce("div", "dash-grid");
 	const emptyState = ce("div", "dash-empty");
 	const emptyIcon = ce("div", "dash-empty-icon");
@@ -2791,6 +3437,30 @@ function renderDashboardCards(refs: DashRefs): void {
 			void doRefreshProjectFlows(p.slug, p.name, refreshBtn);
 		});
 
+		const improveBtn = ce("button", "dash-card-action");
+		improveBtn.type = "button";
+		improveBtn.title =
+			"Copy a Claude-Code-ready prompt to clipboard. Paste it in Claude inside this repo to regroup snap-flows.ts by user-journey.";
+		improveBtn.setAttribute("aria-label", `Improve flows for ${p.slug}`);
+		improveBtn.appendChild(icon("sparkles", { size: 14 }));
+		improveBtn.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			ev.preventDefault();
+			void doImproveProjectFlows(p.slug, p.name, improveBtn);
+		});
+
+		const settingsBtn = ce("button", "dash-card-action");
+		settingsBtn.type = "button";
+		settingsBtn.title =
+			"Project settings — gallery URL, project token, last push, workspace path";
+		settingsBtn.setAttribute("aria-label", `Settings for ${p.slug}`);
+		settingsBtn.appendChild(icon("settings", { size: 14 }));
+		settingsBtn.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			ev.preventDefault();
+			void openProjectSettings(p.slug);
+		});
+
 		const removeBtn = ce("button", "dash-card-action dash-card-action-danger");
 		removeBtn.type = "button";
 		removeBtn.title =
@@ -2803,7 +3473,7 @@ function renderDashboardCards(refs: DashRefs): void {
 			void doRemoveProject(p.slug, p.name);
 		});
 
-		actions.append(doctorBtn, refreshBtn, removeBtn);
+		actions.append(doctorBtn, refreshBtn, improveBtn, settingsBtn, removeBtn);
 
 		card.append(top, nameEl, slugEl, actions);
 		card.addEventListener("click", () => enterProject(p.slug));
@@ -2921,53 +3591,45 @@ function openAddTypeChooser(): void {
 	document.addEventListener("keydown", onKey);
 }
 
-// Web project onboarding — minimal form for now (system wired later).
+// Web project onboarding — phased wizard. Mirrors mobile's wizard-v2
+// (Detect → Plan → Install → Verify) for the web surface:
+//
+//   1. Details   — name, base URL, platform URL, setup token.
+//   2. Discover  — crawl base URL, surface routes the wizard found.
+//   3. Preview   — auto-group routes by URL prefix, let the user
+//                  edit (rename / toggle).
+//   4. Create    — POST to gallery, persist locally, seed orchestrator
+//                  with the preview flows.
+//
+// The user can skip discovery (e.g. SPA without server-rendered links)
+// and land on a blank flow tree — auto-flows still get created on the
+// first snap, same as Phase 1 web onboarding.
+type WebWizardPhase = "details" | "discover" | "preview" | "create";
+interface WebWizardState {
+	phase: WebWizardPhase;
+	name: string;
+	baseUrl: string;
+	platformUrl: string;
+	setupToken: string;
+	routes: Array<{ path: string; title?: string }>;
+	flows: Array<{ id: string; name: string; routes: string[]; include: boolean }>;
+	hint: "ok" | "spa" | "auth-wall" | "blocked";
+	error?: string;
+}
 function openAddWebForm(): void {
-	const backdrop = document.createElement("div");
-	backdrop.className = "rn-confirm-backdrop";
-	const dlg = document.createElement("div");
-	dlg.className = "rn-confirm-dialog";
+	const wiz: WebWizardState = {
+		phase: "details",
+		name: "",
+		baseUrl: "",
+		platformUrl: readLocal("prisma:platform-url") ?? "",
+		setupToken: readLocal("prisma:setup-token") ?? "",
+		routes: [],
+		flows: [],
+		hint: "ok",
+	};
 
-	const title = document.createElement("h3");
-	title.className = "rn-confirm-title";
-	title.textContent = "Add web project";
-
-	const body = document.createElement("p");
-	body.className = "rn-confirm-body";
-	body.textContent =
-		"Give it a name and the URL where the app runs. Capture system is plugged in later.";
-
-	const nameLabel = document.createElement("label");
-	nameLabel.className = "rn-push-field-label";
-	nameLabel.textContent = "Name";
-	const nameInput = document.createElement("input");
-	nameInput.className = "input";
-	nameInput.type = "text";
-	nameInput.placeholder = "e.g. Acme Storefront";
-
-	const urlLabel = document.createElement("label");
-	urlLabel.className = "rn-push-field-label";
-	urlLabel.textContent = "URL";
-	const urlInput = document.createElement("input");
-	urlInput.className = "input";
-	urlInput.type = "url";
-	urlInput.placeholder = "https://your-app.example.com/";
-
-	const errorBox = document.createElement("div");
-	errorBox.className = "rn-wizard-error";
-	errorBox.style.display = "none";
-
-	const actions = document.createElement("div");
-	actions.className = "rn-confirm-actions";
-	const cancelBtn = document.createElement("button");
-	cancelBtn.className = "btn btn-ghost";
-	cancelBtn.textContent = "Cancel";
-	const saveBtn = document.createElement("button");
-	saveBtn.className = "btn btn-primary";
-	saveBtn.textContent = "Add project";
-	actions.append(cancelBtn, saveBtn);
-
-	dlg.append(title, body, nameLabel, nameInput, urlLabel, urlInput, errorBox, actions);
+	const backdrop = ce("div", "rn-confirm-backdrop");
+	const dlg = ce("div", "rn-confirm-dialog rn-web-wizard");
 	backdrop.appendChild(dlg);
 	document.body.appendChild(backdrop);
 
@@ -2978,55 +3640,354 @@ function openAddWebForm(): void {
 	const onKey = (e: KeyboardEvent): void => {
 		if (e.key === "Escape") close();
 	};
-	cancelBtn.addEventListener("click", close);
 	backdrop.addEventListener("click", (e) => {
 		if (e.target === backdrop) close();
 	});
 	document.addEventListener("keydown", onKey);
 
-	saveBtn.addEventListener("click", () => {
-		const nm = nameInput.value.trim();
-		const u = urlInput.value.trim();
-		if (!nm || !u) {
-			errorBox.style.display = "";
-			errorBox.textContent = "Name and URL are required.";
-			return;
+	const render = (): void => {
+		dlg.replaceChildren();
+		// Stepper across the top: shows the user which phase they're in
+		// + lets them go back to "details" to fix a typo without
+		// re-running discovery.
+		const stepper = ce("div", "rn-web-wizard-stepper");
+		const phases: Array<{ key: WebWizardPhase; label: string }> = [
+			{ key: "details", label: "1. Details" },
+			{ key: "discover", label: "2. Discover" },
+			{ key: "preview", label: "3. Preview" },
+			{ key: "create", label: "4. Create" },
+		];
+		for (const p of phases) {
+			const chip = ce("span", "rn-web-wizard-step");
+			if (p.key === wiz.phase) chip.classList.add("is-active");
+			if (
+				phases.findIndex((x) => x.key === p.key) <
+				phases.findIndex((x) => x.key === wiz.phase)
+			) {
+				chip.classList.add("is-done");
+			}
+			chip.textContent = p.label;
+			stepper.appendChild(chip);
 		}
-		const slug = nm
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-|-$/g, "")
-			.slice(0, 48) || `web-${Date.now().toString(36).slice(-6)}`;
+		dlg.appendChild(stepper);
 
-		// Stub: append to the in-memory registry as a "web" project. The
-		// snap-bridge / upload wiring lands in the next pass; for now this
-		// just gives the dashboard a card the user can click into.
-		state.set((cur) => ({
-			...cur,
-			source: { ...cur.source, kind: "url", url: u },
-			rn: {
-				...cur.rn,
-				registry: [
-					...cur.rn.registry,
-					{
-						slug,
-						name: nm,
-						platform: "web",
-						projectToken: "",
-						uploadUrl: "",
-						registeredAt: new Date().toISOString(),
-						// type field not on RnProjectInfo — we attach it ad-hoc;
-						// projectTypeOf() reads it via a structural cast.
-						type: "web",
-					} as unknown as RnProjectInfo,
-				],
-				selectedProjectSlug: slug,
-			},
-		}));
-		close();
-	});
+		if (wiz.phase === "details") renderDetails();
+		else if (wiz.phase === "discover") renderDiscover();
+		else if (wiz.phase === "preview") renderPreview();
+		else if (wiz.phase === "create") renderCreate();
+	};
 
-	queueMicrotask(() => nameInput.focus());
+	const renderDetails = (): void => {
+		const title = ce("h3", "rn-confirm-title");
+		title.textContent = "Add web project";
+		const body = ce("p", "rn-confirm-body");
+		body.textContent =
+			"Register the project on the gallery, then we'll scan the base URL for routes and auto-group them into flows before you snap.";
+
+		const fields = ce("div", "rn-web-wizard-fields");
+		const mkField = (label: string, input: HTMLInputElement): void => {
+			const lab = ce("label", "rn-push-field-label");
+			lab.textContent = label;
+			fields.append(lab, input);
+		};
+		const nameInput = ce("input", "input");
+		nameInput.type = "text";
+		nameInput.placeholder = "e.g. Acme Storefront";
+		nameInput.value = wiz.name;
+		nameInput.addEventListener("input", () => {
+			wiz.name = nameInput.value;
+		});
+		mkField("Name", nameInput);
+
+		const urlInput = ce("input", "input");
+		urlInput.type = "url";
+		urlInput.placeholder = "https://your-app.example.com/";
+		urlInput.value = wiz.baseUrl;
+		urlInput.addEventListener("input", () => {
+			wiz.baseUrl = urlInput.value;
+		});
+		mkField("Base URL", urlInput);
+
+		const platformInput = ce("input", "input");
+		platformInput.type = "url";
+		platformInput.placeholder = "https://unicorn-studio-gallery.vercel.app";
+		platformInput.value = wiz.platformUrl;
+		platformInput.addEventListener("input", () => {
+			wiz.platformUrl = platformInput.value;
+		});
+		mkField("Platform URL", platformInput);
+
+		const tokenInput = ce("input", "input");
+		tokenInput.type = "password";
+		tokenInput.placeholder = "setup_…";
+		tokenInput.value = wiz.setupToken;
+		tokenInput.addEventListener("input", () => {
+			wiz.setupToken = tokenInput.value;
+		});
+		mkField("Setup token", tokenInput);
+
+		const errorBox = ce("div", "rn-wizard-error");
+		errorBox.style.display = wiz.error ? "" : "none";
+		errorBox.textContent = wiz.error ?? "";
+
+		const actions = ce("div", "rn-confirm-actions");
+		const cancelBtn = ce("button", "btn btn-ghost");
+		cancelBtn.type = "button";
+		cancelBtn.textContent = "Cancel";
+		cancelBtn.addEventListener("click", close);
+		const nextBtn = ce("button", "btn btn-primary");
+		nextBtn.type = "button";
+		nextBtn.textContent = "Discover routes";
+		nextBtn.addEventListener("click", () => {
+			const name = wiz.name.trim();
+			const baseUrl = wiz.baseUrl.trim();
+			const platformUrl = wiz.platformUrl.trim().replace(/\/$/, "");
+			const setupToken = wiz.setupToken.trim();
+			if (!name || !baseUrl || !platformUrl || !setupToken) {
+				wiz.error =
+					"Name, base URL, platform URL, and setup token are all required.";
+				render();
+				return;
+			}
+			try {
+				new URL(baseUrl);
+			} catch {
+				wiz.error = "Base URL must be a valid URL (include https:// prefix).";
+				render();
+				return;
+			}
+			wiz.name = name;
+			wiz.baseUrl = baseUrl;
+			wiz.platformUrl = platformUrl;
+			wiz.setupToken = setupToken;
+			wiz.error = undefined;
+			wiz.phase = "discover";
+			render();
+			void runDiscover();
+		});
+		actions.append(cancelBtn, nextBtn);
+
+		dlg.append(title, body, fields, errorBox, actions);
+		queueMicrotask(() => nameInput.focus());
+	};
+
+	const renderDiscover = (): void => {
+		const title = ce("h3", "rn-confirm-title");
+		title.textContent = "Scanning the base URL…";
+		const body = ce("p", "rn-confirm-body");
+		body.textContent = `Following internal links from ${wiz.baseUrl} to find routes the wizard can pre-organize into flows.`;
+		const spinner = ce("div", "rn-web-wizard-spinner");
+		spinner.textContent = "⠋";
+		// Rotating dot animation via CSS would be cleaner but this works.
+		let i = 0;
+		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+		const tick = window.setInterval(() => {
+			i = (i + 1) % frames.length;
+			spinner.textContent = frames[i] ?? "⠋";
+		}, 80);
+		const stop = (): void => window.clearInterval(tick);
+		backdrop.addEventListener("transitionend", stop, { once: true });
+		dlg.append(title, body, spinner);
+	};
+
+	const runDiscover = async (): Promise<void> => {
+		try {
+			const r = await req.discoverWebRoutes({ baseUrl: wiz.baseUrl, limit: 50 });
+			if (!r.ok) {
+				wiz.error = r.error;
+				wiz.phase = "details";
+				render();
+				return;
+			}
+			wiz.routes = r.routes;
+			wiz.hint = r.hint;
+			wiz.flows = autoGroupRoutes(r.routes);
+			wiz.phase = "preview";
+			render();
+		} catch (err) {
+			wiz.error = (err as Error).message;
+			wiz.phase = "details";
+			render();
+		}
+	};
+
+	const renderPreview = (): void => {
+		const title = ce("h3", "rn-confirm-title");
+		title.textContent =
+			wiz.routes.length === 0
+				? "No routes discovered"
+				: `Found ${wiz.routes.length} route${wiz.routes.length === 1 ? "" : "s"} · ${wiz.flows.filter((f) => f.include).length} auto-flows`;
+		const body = ce("p", "rn-confirm-body");
+		if (wiz.hint === "spa") {
+			body.textContent =
+				"This looks like an SPA without server-rendered links — only the root path was found. You can still create the project; auto-flows will get created from the URL path on each snap.";
+		} else if (wiz.hint === "auth-wall") {
+			body.textContent =
+				"The base URL responded with an auth wall. Only routes linked from the login page are listed. You can still create the project and snap behind auth once the iframe is logged in.";
+		} else if (wiz.hint === "blocked") {
+			body.textContent =
+				"The base URL didn't respond or blocked the request. You can still create the project — flows will get auto-created on your first snap.";
+		} else {
+			body.textContent =
+				"Review the auto-grouping below — uncheck flows you don't want pre-created. Snaps captured on routes from an unchecked flow will still cluster into a fresh flow lazily.";
+		}
+
+		const list = ce("ul", "rn-web-wizard-flows");
+		for (const f of wiz.flows) {
+			const li = ce("li", "rn-web-wizard-flow");
+			const check = ce("input", "rn-web-wizard-check") as HTMLInputElement;
+			check.type = "checkbox";
+			check.checked = f.include;
+			check.addEventListener("change", () => {
+				f.include = check.checked;
+			});
+			const meta = ce("div", "rn-web-wizard-flow-meta");
+			const name = ce("input", "input rn-web-wizard-flow-name") as HTMLInputElement;
+			name.type = "text";
+			name.value = f.name;
+			name.addEventListener("input", () => {
+				f.name = name.value;
+			});
+			const routes = ce("div", "rn-web-wizard-flow-routes");
+			routes.textContent = f.routes.join(" · ");
+			meta.append(name, routes);
+			li.append(check, meta);
+			list.appendChild(li);
+		}
+
+		const errorBox = ce("div", "rn-wizard-error");
+		errorBox.style.display = wiz.error ? "" : "none";
+		errorBox.textContent = wiz.error ?? "";
+
+		const actions = ce("div", "rn-confirm-actions");
+		const backBtn = ce("button", "btn btn-ghost");
+		backBtn.type = "button";
+		backBtn.textContent = "Back";
+		backBtn.addEventListener("click", () => {
+			wiz.phase = "details";
+			render();
+		});
+		const skipBtn = ce("button", "btn btn-ghost");
+		skipBtn.type = "button";
+		skipBtn.textContent = "Skip auto-flows";
+		skipBtn.title = "Create the project with an empty flow tree";
+		skipBtn.addEventListener("click", () => {
+			wiz.flows = wiz.flows.map((f) => ({ ...f, include: false }));
+			wiz.phase = "create";
+			render();
+			void runCreate();
+		});
+		const createBtn = ce("button", "btn btn-primary");
+		createBtn.type = "button";
+		createBtn.textContent = "Create project";
+		createBtn.addEventListener("click", () => {
+			wiz.phase = "create";
+			render();
+			void runCreate();
+		});
+		actions.append(backBtn, skipBtn, createBtn);
+
+		dlg.append(title, body, list, errorBox, actions);
+	};
+
+	const renderCreate = (): void => {
+		const title = ce("h3", "rn-confirm-title");
+		title.textContent = "Creating project…";
+		const body = ce("p", "rn-confirm-body");
+		body.textContent =
+			"Registering on the gallery, persisting locally, and seeding the orchestrator with the flows you approved.";
+		dlg.append(title, body);
+	};
+
+	const runCreate = async (): Promise<void> => {
+		const seedFlows = wiz.flows
+			.filter((f) => f.include && f.routes.length > 0 && f.name.trim().length > 0)
+			.map((f) => ({ id: f.id, name: f.name.trim(), routes: f.routes }));
+		try {
+			const r = await req.createWebProject({
+				name: wiz.name,
+				baseUrl: wiz.baseUrl,
+				platformUrl: wiz.platformUrl,
+				setupToken: wiz.setupToken,
+				seedFlows: seedFlows.length > 0 ? seedFlows : undefined,
+			});
+			if (!r.ok) {
+				wiz.error = r.error;
+				wiz.phase = "preview";
+				render();
+				return;
+			}
+			writeLocal("prisma:platform-url", wiz.platformUrl);
+			writeLocal("prisma:setup-token", wiz.setupToken);
+			const seedTail =
+				r.seededFlows && r.seededFlows > 0
+					? ` with ${r.seededFlows} flow${r.seededFlows === 1 ? "" : "s"}`
+					: "";
+			log(
+				r.reused
+					? `↻ Reused existing project "${r.slug}"${seedTail}`
+					: `+ Created web project "${r.slug}"${seedTail}`,
+				"success",
+			);
+			await refreshProjectRegistry();
+			// Re-pull flows so the sidebar reflects the seeded tree
+			// when the user enters the project.
+			try {
+				const status = await req.snapServerStatus({});
+				state.set((cur) => ({
+					...cur,
+					rn: { ...cur.rn, flows: status.flows },
+				}));
+			} catch {}
+			state.set((cur) => ({
+				...cur,
+				source: { ...cur.source, kind: "url", url: wiz.baseUrl },
+				rn: { ...cur.rn, selectedProjectSlug: r.slug },
+			}));
+			close();
+		} catch (err) {
+			wiz.error = (err as Error).message;
+			wiz.phase = "preview";
+			render();
+		}
+	};
+
+	render();
+}
+
+/**
+ * Auto-group discovered routes by the first path segment. `/auth/login`
+ * and `/auth/signup` cluster into "Auth"; `/dashboard` is its own flow.
+ * Same heuristic the orchestrator's `ensureAutoFlowWithPlacement` uses
+ * lazily on first snap, lifted to the wizard so the preview matches
+ * what'll happen later.
+ */
+function autoGroupRoutes(
+	routes: ReadonlyArray<{ path: string; title?: string }>,
+): Array<{ id: string; name: string; routes: string[]; include: boolean }> {
+	const groups = new Map<string, string[]>();
+	for (const r of routes) {
+		const path = r.path || "/";
+		const seg = path.split("/").filter(Boolean)[0] ?? "home";
+		const list = groups.get(seg) ?? [];
+		list.push(path);
+		groups.set(seg, list);
+	}
+	return [...groups.entries()].map(([seg, paths]) => ({
+		id: seg,
+		name: prettyFlowName(seg),
+		routes: paths,
+		include: true,
+	}));
+}
+
+function prettyFlowName(slug: string): string {
+	if (slug === "home" || slug === "") return "Home";
+	return slug
+		.split(/[-_]/)
+		.filter(Boolean)
+		.map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+		.join(" ");
 }
 
 // ─── WEB MODE LAYOUT (URL / Local) ───
@@ -3076,12 +4037,15 @@ function buildWebLayout(): WebRefs {
 	// MIDDLE — Tab strip (Live | Library) + tab panes
 	const main = ce("main", "web-main");
 
-	// Tab strip header
+	// Tab strip header — Live tab is hidden for now; capture happens via
+	// the Chrome extension, and the Library is the only meaningful pane.
+	// Strip stays in the DOM so we can restore Live later without a refactor.
 	const tabStrip = ce("div", "web-tabs tabs");
-	const tabLive = ce("button", "tab is-active");
+	tabStrip.style.display = "none";
+	const tabLive = ce("button", "tab");
 	tabLive.type = "button";
 	tabLive.append(icon("play", { size: 12 }), document.createTextNode("Live"));
-	const tabLibrary = ce("button", "tab");
+	const tabLibrary = ce("button", "tab is-active");
 	tabLibrary.type = "button";
 	tabLibrary.append(
 		icon("image", { size: 12 }),
@@ -3089,8 +4053,9 @@ function buildWebLayout(): WebRefs {
 	);
 	tabStrip.append(tabLive, tabLibrary);
 
-	// LIVE pane — URL bar + iframe + filmstrip
-	const paneLive = ce("div", "web-pane web-pane-live is-active");
+	// LIVE pane — URL bar + iframe + filmstrip (kept mounted but hidden so
+	// the iframe URL persistence + state machinery doesn't break).
+	const paneLive = ce("div", "web-pane web-pane-live");
 	const urlBar = ce("div", "web-urlbar");
 	const reloadBtn = ce("button", "btn btn-ghost btn-icon btn-sm");
 	reloadBtn.title = "Reload";
@@ -3100,15 +4065,49 @@ function buildWebLayout(): WebRefs {
 	urlInput.placeholder = "https://your-app.example.com/";
 	const loadBtn = ce("button", "btn btn-secondary btn-sm");
 	loadBtn.textContent = "Load";
+
+	// Device size picker — pins the iframe to a known viewport so every
+	// snap from this device is the same dimensions. Desktop is the
+	// default for new sessions; selection persists per-Capture install
+	// via localStorage so designers can re-open into the same preset.
+	const devicePicker = ce("select", "input web-device-picker");
+	for (const opt of [
+		{ key: "desktop", label: "Desktop 1440×900" },
+		{ key: "tablet", label: "Tablet 768×1024" },
+		{ key: "mobile", label: "Mobile 375×667" },
+	]) {
+		const optEl = document.createElement("option");
+		optEl.value = opt.key;
+		optEl.textContent = opt.label;
+		devicePicker.appendChild(optEl);
+	}
+	const SAVED_DEVICE = (readLocal("prisma:web-device") || "desktop") as
+		| "desktop"
+		| "tablet"
+		| "mobile";
+	devicePicker.value = SAVED_DEVICE;
+
 	const snapBtn = ce("button", "btn btn-primary btn-sm");
-	snapBtn.title = "Snap the current page (system coming soon)";
+	snapBtn.title = "Snap (⌘⇧S)";
 	snapBtn.append(icon("camera", { size: 14 }), document.createTextNode("Snap"));
-	urlBar.append(reloadBtn, urlInput, loadBtn, snapBtn);
+	urlBar.append(reloadBtn, urlInput, loadBtn, devicePicker, snapBtn);
 
 	const stage = ce("div", "web-stage");
+	const iframeWrap = ce("div", "web-iframe-wrap");
 	const iframe = ce("iframe", "web-iframe");
 	iframe.title = "Web preview";
-	stage.appendChild(iframe);
+	iframeWrap.appendChild(iframe);
+	stage.appendChild(iframeWrap);
+
+	// Apply persisted device size on mount so the iframe loads at the
+	// right viewport from the first paint (no jarring resize after a
+	// short delay).
+	applyDevicePreset(iframe, SAVED_DEVICE);
+	devicePicker.addEventListener("change", () => {
+		const value = devicePicker.value as "desktop" | "tablet" | "mobile";
+		writeLocal("prisma:web-device", value);
+		applyDevicePreset(iframe, value);
+	});
 
 	const filmstripWrap = ce("div", "web-filmstrip-wrap");
 	const filmstripLabel = ce("div", "web-filmstrip-label");
@@ -3122,7 +4121,7 @@ function buildWebLayout(): WebRefs {
 	paneLive.append(urlBar, stage, filmstripWrap);
 
 	// LIBRARY pane — snap gallery grouped by flow (placeholder until system is wired)
-	const paneLibrary = ce("div", "web-pane web-pane-library");
+	const paneLibrary = ce("div", "web-pane web-pane-library is-active");
 	const libraryEmpty = ce("div", "web-library-empty");
 	const libIcon = ce("div", "web-library-empty-icon");
 	libIcon.appendChild(icon("image", { size: 32, strokeWidth: 1.5 }));
@@ -3130,10 +4129,10 @@ function buildWebLayout(): WebRefs {
 	libTitle.textContent = "Your snap library is empty";
 	const libHint = ce("div", "web-library-empty-hint");
 	libHint.textContent =
-		"Load a URL in the Live tab and capture a frame — it'll land here grouped by flow.";
+		"Open the page in Chrome, click the Unicorn Capture extension, and snap. Captures land here grouped by flow.";
 	const libCta = ce("button", "btn btn-secondary btn-sm web-library-empty-cta");
 	libCta.type = "button";
-	libCta.append(icon("play", { size: 14 }), document.createTextNode("Open Live"));
+	libCta.style.display = "none";
 	libraryEmpty.append(libIcon, libTitle, libHint, libCta);
 	const libraryGrid = ce("div", "web-library-grid");
 	libraryGrid.appendChild(libraryEmpty);
@@ -3143,6 +4142,10 @@ function buildWebLayout(): WebRefs {
 
 	// RIGHT — context (Source URL/dropzone, Project, Session)
 	const rightPanel = ce("aside", "web-rightpanel");
+	// Hidden for now: the Source dropzone + session meta were Live-mode
+	// affordances. With the Chrome extension as the snap surface, the right
+	// rail is dead weight. Kept mounted so future modes can re-enable it.
+	rightPanel.style.display = "none";
 	const sourceSection = ce("div", "section");
 	const sourceSectionTitle = ce("div", "section-title");
 	sourceSectionTitle.textContent = "Source";
@@ -3189,7 +4192,7 @@ function buildWebLayout(): WebRefs {
 	layout.append(sidebar, main, rightPanel);
 	root.appendChild(layout);
 
-	let currentTab: WebTab = "live";
+	let currentTab: WebTab = "library";
 	const setTab = (tab: WebTab): void => {
 		currentTab = tab;
 		const liveActive = tab === "live";
@@ -3205,9 +4208,7 @@ function buildWebLayout(): WebRefs {
 		setTab("library");
 		if (webRefs) renderWebLibrary(webRefs);
 	});
-	libCta.addEventListener("click", () => setTab("live"));
-	// Initialize active state classes (mirror is-active to legacy `active` for tab styling parity).
-	tabLive.classList.add("active");
+	tabLibrary.classList.add("active");
 
 	const refs: WebRefs = {
 		root,
@@ -3282,11 +4283,39 @@ function ensureWebMounted(): WebRefs {
 function setWebVisible(visible: boolean): void {
 	if (!webRefs) return;
 	webRefs.root.style.display = visible ? "flex" : "none";
+	// On enter, auto-load the project's persisted baseUrl into the iframe
+	// so the user can snap immediately without manually typing the URL.
+	// We only auto-load when the iframe is empty (or showing about:blank)
+	// so subsequent re-entries don't blow away an in-progress nav.
+	if (visible) {
+		const slug = state.get().rn.selectedProjectSlug;
+		const proj = state.get().rn.registry.find((p) => p.slug === slug);
+		const baseUrl = proj?.baseUrl;
+		if (baseUrl && (!webRefs.iframe.src || webRefs.iframe.src === "about:blank")) {
+			webRefs.iframe.src = baseUrl;
+			webRefs.urlInput.value = baseUrl;
+		}
+	}
 }
 
 function applyWebState(s: AppState): void {
 	if (!webRefs) return;
 	const refs = webRefs;
+	// Compute newly-arrived snap keys so the Library can shimmer them on
+	// first render — same mechanism the mobile renderer uses.
+	freshSnapKeysThisRender = new Set();
+	if (!seenSnapKeysPrimed) {
+		for (const sn of s.rn.snaps) seenSnapKeys.add(snapKey(sn));
+		seenSnapKeysPrimed = true;
+	} else {
+		for (const sn of s.rn.snaps) {
+			const k = snapKey(sn);
+			if (!seenSnapKeys.has(k)) {
+				freshSnapKeysThisRender.add(k);
+				seenSnapKeys.add(k);
+			}
+		}
+	}
 	// Keep URL inputs in sync without clobbering the user's caret position.
 	const url = s.source.url ?? "";
 	if (document.activeElement !== refs.urlInput && refs.urlInput.value !== url) {
@@ -3301,6 +4330,42 @@ function applyWebState(s: AppState): void {
 	refs.loadBtn.disabled = !url.trim();
 	refs.reloadBtn.disabled = !refs.iframe.src;
 	refs.sourceLoadBtn.disabled = !url.trim();
+
+	// Render flow list — for the currently-selected web project, show the
+	// orchestrator's flows (auto-created on snap) as a flat list. Clicking
+	// a flow scrolls the library tab to its section. Mirrors mobile's
+	// rn-flows-side but simpler — web doesn't have nested sub-flows yet
+	// and the user isn't going to drag-reorder a 5-item list.
+	renderWebSidebarFlows(refs, s);
+	// Keep the library tab in sync with new snaps + deletes. Cheap
+	// re-render: replaceChildren + DOM diff via fresh nodes. Snap count
+	// in real projects stays under 200 — no perf concern.
+	if (refs.getTab() === "library") renderWebLibrary(refs);
+}
+
+function renderWebSidebarFlows(refs: WebRefs, s: AppState): void {
+	const host = refs.flowsList;
+	host.replaceChildren();
+	const slug = s.rn.selectedProjectSlug;
+	if (!slug) {
+		const empty = ce("div", "rn-flows-side-empty");
+		empty.textContent = "Open a web project to see its flows.";
+		host.appendChild(empty);
+		return;
+	}
+	const projectFlows = s.rn.flows.filter((f) => f.projectId === slug);
+	const projectSnaps = s.rn.snaps.filter((sn) => sn.projectId === slug);
+	if (projectFlows.length === 0 && projectSnaps.length === 0) {
+		const empty = ce("div", "rn-flows-side-empty");
+		empty.textContent = "No flows yet — snap from the extension to start.";
+		host.appendChild(empty);
+		return;
+	}
+	const groups = groupSnapsByFlow(projectSnaps, projectFlows);
+	// Reuse the mobile sidebar tree — same drag/reorder/reparent, same
+	// unseen-badge behavior, same hierarchy rendering. The library grid is
+	// the scroll target it'll smooth-scroll into view on click.
+	renderSidebarFlowTree(host, groups, refs.libraryGrid);
 }
 
 function switchSource(kind: SourceKind): void {
@@ -3332,13 +4397,188 @@ function writeLocal(key: string, value: string): void {
  *                         Best for long pages (top/middle/bottom) + filter
  *                         states the improver hasn't given a stateHash to.
  */
-async function doSnap(mode: "auto" | "variant" = "auto"): Promise<void> {
+
+/**
+ * Run a one-click tour of every declared screen in the active project.
+ * Drives the existing `/tour/goto` → `ready` → `snap` cycle on the
+ * snap-server for each declared screen. Surfaces a progress spinner,
+ * then a results modal with per-screen success/failure so designers
+ * can see at a glance what worked and what didn't.
+ *
+ * No declared screens? Tells the user up front instead of running a
+ * 0-step tour and confusing them.
+ */
+async function doRunTour(): Promise<void> {
+	const cur = state.get();
+	const slug = cur.rn.selectedProjectSlug;
+	if (!slug) {
+		log("Pick a project first.", "info");
+		return;
+	}
+	if (!cur.rn.projects.includes(slug)) {
+		log(
+			"Bridge isn't connected. Boot your app first, then re-run the tour.",
+			"error",
+		);
+		return;
+	}
+	const flowsForProject = cur.rn.flows.filter((f) => f.projectId === slug);
+	const totalDeclaredScreens = flowsForProject.reduce(
+		(sum, f) => sum + (f.screens?.filter((s) => !s.hidden).length ?? 0),
+		0,
+	);
+	if (totalDeclaredScreens === 0) {
+		log(
+			"No declared screens in this project — add screens to your snap-flows.ts to enable tour mode.",
+			"info",
+		);
+		return;
+	}
+	const projName =
+		cur.rn.registry.find((p) => p.slug === slug)?.name ?? slug;
+	const ok = await showConfirm({
+		title: `Run tour for ${projName}?`,
+		body: `Capture will navigate through ${totalDeclaredScreens} declared screen${totalDeclaredScreens === 1 ? "" : "s"} and snap each one. The app will jump around — don't drive the simulator until it finishes.`,
+		confirmLabel: "Start tour",
+	});
+	if (!ok) return;
+	state.set((c) => ({ ...c, rn: { ...c.rn, pushing: true } }));
+	// Show a quick "Running…" toast so the user knows something's happening.
+	// The full results land in showTourSummary at the end.
+	log(`Running tour over ${totalDeclaredScreens} screen(s)…`, "info");
+	try {
+		const r = await req.runProjectTour({ projectSlug: slug });
+		if (!r.ok) {
+			log(`Tour failed: ${r.error}`, "error");
+			return;
+		}
+		showTourSummary({
+			total: r.total,
+			succeeded: r.succeeded,
+			failed: r.failed,
+			visits: r.visits,
+		});
+		// Refresh status so the new snaps show up in the grid.
+		try {
+			const status = await req.snapServerStatus({});
+			state.set((c) => ({
+				...c,
+				rn: {
+					...c.rn,
+					snaps: status.snaps,
+					pendingUploads: status.pendingUploads,
+				},
+			}));
+		} catch {}
+	} catch (err) {
+		log(`Tour failed: ${(err as Error).message}`, "error");
+	} finally {
+		state.set((c) => ({ ...c, rn: { ...c.rn, pushing: false } }));
+	}
+}
+
+/**
+ * Tour results modal — same pattern as showPushSummary: counts at the
+ * top, optional failed-screens detail list, single Close action. Kept
+ * thin because the tour itself already logged each step; this is just
+ * a "what just happened" recap.
+ */
+function showTourSummary(opts: {
+	total: number;
+	succeeded: number;
+	failed: number;
+	visits: Array<{
+		flowName: string;
+		screenName: string;
+		route: string;
+		ok: boolean;
+		error?: string;
+	}>;
+}): void {
+	const backdrop = document.createElement("div");
+	backdrop.className = "rn-confirm-backdrop";
+	const dlg = document.createElement("div");
+	dlg.className = "rn-confirm-dialog rn-push-summary-dialog";
+
+	const title = document.createElement("h3");
+	title.className = "rn-confirm-title";
+	title.textContent =
+		opts.failed === 0 ? "Tour complete" : "Tour finished with issues";
+
+	const counts = document.createElement("p");
+	counts.className = "rn-confirm-body";
+	const parts: string[] = [`${opts.succeeded}/${opts.total} captured`];
+	if (opts.failed > 0) parts.push(`${opts.failed} failed`);
+	counts.textContent = parts.join(" · ");
+
+	dlg.append(title, counts);
+
+	const failures = opts.visits.filter((v) => !v.ok);
+	if (failures.length > 0) {
+		const details = document.createElement("details");
+		details.className = "rn-push-summary-details";
+		details.open = true;
+		const summary = document.createElement("summary");
+		summary.textContent = `Failed screens (${failures.length})`;
+		details.appendChild(summary);
+		const list = document.createElement("ul");
+		list.className = "rn-push-summary-list";
+		for (const f of failures.slice(0, 20)) {
+			const li = document.createElement("li");
+			li.textContent = `${f.flowName} → ${f.screenName} (${f.route})${f.error ? ` — ${f.error}` : ""}`;
+			list.appendChild(li);
+		}
+		if (failures.length > 20) {
+			const li = document.createElement("li");
+			li.className = "rn-push-summary-more";
+			li.textContent = `…and ${failures.length - 20} more`;
+			list.appendChild(li);
+		}
+		details.appendChild(list);
+		dlg.appendChild(details);
+	}
+
+	const actions = document.createElement("div");
+	actions.className = "rn-confirm-actions";
+	const closeBtn = document.createElement("button");
+	closeBtn.className = "btn btn-primary";
+	closeBtn.textContent = "Close";
+	actions.appendChild(closeBtn);
+	dlg.appendChild(actions);
+
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = () => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent) => {
+		if (e.key === "Escape" || e.key === "Enter") close();
+	};
+	closeBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+	queueMicrotask(() => closeBtn.focus());
+}
+
+async function doSnap(
+	mode: "auto" | "variant" = "auto",
+	target?: {
+		forceFlowId?: string;
+		forceScreen?: { sessionId: string; sequence: number };
+	},
+): Promise<void> {
 	if (state.get().rn.busy) return; // double-click guard
 	state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: true } }));
 	try {
 		const r = await req.performSnap({
 			projectSlug: state.get().rn.selectedProjectSlug ?? undefined,
 			mode,
+			forceFlowId: target?.forceFlowId,
+			forceScreen: target?.forceScreen,
 		});
 		if (!r.ok) {
 			log(r.error, "error");
@@ -3420,6 +4660,45 @@ let dragSrc: {
 // Separate drag track for flow-section reordering — distinct from
 // card drag so the two can't be confused on dragover.
 let flowDragSrcId: string | null = null;
+// Source's parentFlowId, captured on dragstart. Used to enforce sibling-only
+// drops — sub-flow reorder mustn't promote a sub-flow to top-level or move
+// it under a different parent via drag (those reparent ops have their own UI).
+let flowDragSrcParent: string | null = null;
+
+/**
+ * Compute the new flat orderedIds for reorderFlows after a sibling
+ * drag-drop. Non-sibling flows keep their positions and original order;
+ * siblings of the source/target's parent get the new sibling order
+ * injected into their existing slot positions in the flat array. The
+ * backend stores manifest.flows as a flat list and sorts by orderedIds
+ * index, so siblings staying adjacent + getting the new internal order
+ * is enough.
+ */
+function reorderSiblings(
+	allFlows: ReadonlyArray<{ id: string; parentFlowId?: string }>,
+	srcId: string,
+	tgtId: string,
+	above: boolean,
+): string[] {
+	const src = allFlows.find((f) => f.id === srcId);
+	if (!src) return allFlows.map((f) => f.id);
+	const parent = src.parentFlowId ?? null;
+	const siblings = allFlows
+		.filter((f) => (f.parentFlowId ?? null) === parent)
+		.map((f) => f.id);
+	const withoutSrc = siblings.filter((id) => id !== srcId);
+	let toIdx = withoutSrc.indexOf(tgtId);
+	if (toIdx === -1) toIdx = withoutSrc.length;
+	if (!above) toIdx += 1;
+	withoutSrc.splice(toIdx, 0, srcId);
+	const siblingIter = withoutSrc.values();
+	return allFlows.map((f) => {
+		if ((f.parentFlowId ?? null) === parent) {
+			return siblingIter.next().value ?? f.id;
+		}
+		return f.id;
+	});
+}
 
 async function doReorderFlows(orderedIds: string[]): Promise<void> {
 	const idx = new Map<string, number>();
@@ -3583,6 +4862,34 @@ async function doCreateSubFlow(parentFlowId: string): Promise<void> {
 	}
 }
 
+async function doReparentFlow(
+	flowId: string,
+	newParentId: string | undefined,
+): Promise<void> {
+	state.set((cur) => ({
+		...cur,
+		rn: {
+			...cur.rn,
+			flows: cur.rn.flows.map((f) =>
+				f.id === flowId
+					? newParentId
+						? { ...f, parentFlowId: newParentId }
+						: (() => {
+								const { parentFlowId: _drop, ...rest } = f;
+								return rest;
+							})()
+					: f,
+			),
+		},
+	}));
+	try {
+		const r = await req.reparentFlow({ flowId, newParentId });
+		if (!r.ok) log(`Re-parent failed: ${r.error}`, "error");
+	} catch (err) {
+		log(`Re-parent failed: ${(err as Error).message}`, "error");
+	}
+}
+
 async function doRenameFlow(flowId: string, name: string): Promise<void> {
 	state.set((cur) => ({
 		...cur,
@@ -3596,6 +4903,86 @@ async function doRenameFlow(flowId: string, name: string): Promise<void> {
 		if (!r.ok) log(`Rename failed: ${r.error}`, "error");
 	} catch (err) {
 		log(`Rename failed: ${(err as Error).message}`, "error");
+	}
+}
+
+async function doRenameScreen(
+	flowId: string,
+	declaredId: string,
+	name: string,
+): Promise<void> {
+	state.set((cur) => ({
+		...cur,
+		rn: {
+			...cur.rn,
+			flows: cur.rn.flows.map((f) => {
+				if (f.id !== flowId || !f.screens) return f;
+				return {
+					...f,
+					screens: f.screens.map((sc) =>
+						sc.declaredId === declaredId ? { ...sc, name } : sc,
+					),
+				};
+			}),
+		},
+	}));
+	try {
+		const r = await req.renameScreen({ flowId, declaredId, name });
+		if (!r.ok) log(`Rename screen failed: ${r.error}`, "error");
+	} catch (err) {
+		log(`Rename screen failed: ${(err as Error).message}`, "error");
+	}
+}
+
+async function doHideScreen(
+	flowId: string,
+	declaredId: string,
+): Promise<void> {
+	state.set((cur) => ({
+		...cur,
+		rn: {
+			...cur.rn,
+			flows: cur.rn.flows.map((f) => {
+				if (f.id !== flowId || !f.screens) return f;
+				return {
+					...f,
+					screens: f.screens.map((sc) =>
+						sc.declaredId === declaredId ? { ...sc, hidden: true } : sc,
+					),
+				};
+			}),
+		},
+	}));
+	try {
+		const r = await req.hideScreen({ flowId, declaredId });
+		if (!r.ok) log(`Delete screen failed: ${r.error}`, "error");
+	} catch (err) {
+		log(`Delete screen failed: ${(err as Error).message}`, "error");
+	}
+}
+
+async function doRenameSnap(
+	sessionId: string,
+	sequence: number,
+	name: string,
+): Promise<void> {
+	const display = name.trim() || undefined;
+	state.set((cur) => ({
+		...cur,
+		rn: {
+			...cur.rn,
+			snaps: cur.rn.snaps.map((s) =>
+				s.sessionId === sessionId && s.sequence === sequence
+					? { ...s, displayName: display }
+					: s,
+			),
+		},
+	}));
+	try {
+		const r = await req.renameSnap({ sessionId, sequence, name });
+		if (!r.ok) log(`Rename snap failed: ${r.error}`, "error");
+	} catch (err) {
+		log(`Rename snap failed: ${(err as Error).message}`, "error");
 	}
 }
 
@@ -3642,6 +5029,375 @@ async function doRefreshProjectFlows(
 		btn.classList.remove("is-busy");
 		btn.disabled = false;
 	}
+}
+
+/**
+ * Diff gallery vs. local registry, show a preview modal of gallery-only
+ * projects, archive on confirm. Uses platform URL + setup token from
+ * localStorage (cached by the +Add wizards) — if neither is there, ask
+ * the user to onboard a project first so the creds get cached.
+ */
+/**
+ * Force-evict local PNGs for every snap that's already on the gallery.
+ * Behind a confirm dialog because deletion is irreversible (though
+ * non-destructive — the cloud copy stays and the UI falls back to it).
+ * Reports the freed disk space in MB so the user sees the win.
+ */
+async function doClearPushedSnaps(btn: HTMLButtonElement): Promise<void> {
+	const ok = await showConfirm({
+		title: "Clear cached snaps?",
+		body: "Local PNGs for every snap that's already on the gallery will be deleted. Cards keep their thumbnails by loading from the cloud. Snaps that haven't been pushed yet are left alone. Frees disk space immediately.",
+		confirmLabel: "Clear cache",
+	});
+	if (!ok) return;
+	btn.disabled = true;
+	const originalLabel = btn.textContent;
+	btn.textContent = "Clearing…";
+	try {
+		const r = await req.clearPushedSnaps({});
+		if (r.deleted === 0) {
+			log("Nothing to clear — no pushed snaps with local files.", "info");
+		} else {
+			const mb = (r.freedBytes / (1024 * 1024)).toFixed(1);
+			log(
+				`✓ Cleared ${r.deleted} cached snap${r.deleted === 1 ? "" : "s"} — freed ${mb}MB`,
+				"success",
+			);
+		}
+	} catch (err) {
+		log(`Clear cache failed: ${(err as Error).message}`, "error");
+	} finally {
+		btn.disabled = false;
+		btn.textContent = originalLabel;
+	}
+}
+
+async function doCleanupUnsynced(btn: HTMLButtonElement): Promise<void> {
+	const platform = (readLocal("prisma:platform-url") ?? "").trim();
+	const token = (readLocal("prisma:setup-token") ?? "").trim();
+	if (!platform || !token) {
+		log(
+			"Cleanup needs the platform URL + setup token. Run a project +Add once so they get cached.",
+			"error",
+		);
+		return;
+	}
+	btn.disabled = true;
+	const originalLabel = btn.textContent;
+	btn.textContent = "Scanning…";
+	try {
+		const r = await req.cleanupUnsyncedProjects({
+			platformUrl: platform,
+			setupToken: token,
+			mode: "preview",
+		});
+		if (!r.ok) {
+			log(`Cleanup scan failed: ${r.error}`, "error");
+			return;
+		}
+		if (r.galleryOnly.length === 0) {
+			log("✓ Nothing to clean up — gallery + desktop are in sync.", "success");
+			return;
+		}
+		openCleanupConfirmModal(r.galleryOnly, platform, token);
+	} catch (err) {
+		log(`Cleanup scan failed: ${(err as Error).message}`, "error");
+	} finally {
+		btn.disabled = false;
+		btn.textContent = originalLabel;
+	}
+}
+
+function openCleanupConfirmModal(
+	galleryOnly: ReadonlyArray<{ slug: string; name: string; platform: string }>,
+	platformUrl: string,
+	setupToken: string,
+): void {
+	const backdrop = ce("div", "rn-confirm-backdrop");
+	const dlg = ce("div", "rn-confirm-dialog");
+	const title = ce("h3", "rn-confirm-title");
+	title.textContent = `Archive ${galleryOnly.length} unsynced project${galleryOnly.length === 1 ? "" : "s"}?`;
+	const body = ce("p", "rn-confirm-body");
+	body.textContent =
+		"These projects exist on the gallery but not on this desktop. Archiving moves them to the gallery's 90-day grace period (restorable from the Archived view until then).";
+
+	const list = ce("ul", "rn-cleanup-list");
+	for (const p of galleryOnly) {
+		const li = ce("li", "rn-cleanup-list-item");
+		const tag = ce("span", "rn-cleanup-platform");
+		tag.textContent = p.platform;
+		const slug = ce("span", "rn-cleanup-slug");
+		slug.textContent = p.slug;
+		const name = ce("span", "rn-cleanup-name");
+		name.textContent = p.name;
+		li.append(tag, slug, name);
+		list.appendChild(li);
+	}
+
+	const errorBox = ce("div", "rn-wizard-error");
+	errorBox.style.display = "none";
+
+	const actions = ce("div", "rn-confirm-actions");
+	const cancelBtn = ce("button", "btn btn-ghost");
+	cancelBtn.type = "button";
+	cancelBtn.textContent = "Cancel";
+	const confirmBtn = ce("button", "btn btn-danger");
+	confirmBtn.type = "button";
+	confirmBtn.textContent = "Archive all";
+	actions.append(cancelBtn, confirmBtn);
+
+	dlg.append(title, body, list, errorBox, actions);
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = (): void => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent): void => {
+		if (e.key === "Escape") close();
+	};
+	cancelBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+
+	confirmBtn.addEventListener("click", () => {
+		confirmBtn.disabled = true;
+		confirmBtn.textContent = "Archiving…";
+		void (async () => {
+			try {
+				const r = await req.cleanupUnsyncedProjects({
+					platformUrl,
+					setupToken,
+					mode: "archive",
+				});
+				if (!r.ok) {
+					errorBox.textContent = r.error;
+					errorBox.style.display = "";
+					confirmBtn.disabled = false;
+					confirmBtn.textContent = "Archive all";
+					return;
+				}
+				log(
+					`✓ Archived ${r.archived.length} unsynced project${r.archived.length === 1 ? "" : "s"}${r.errors.length > 0 ? ` (${r.errors.length} failed)` : ""}`,
+					r.errors.length > 0 ? "warn" : "success",
+				);
+				for (const e of r.errors) {
+					log(`  ${e.slug}: ${e.error}`, "error");
+				}
+				close();
+			} catch (err) {
+				errorBox.textContent = (err as Error).message;
+				errorBox.style.display = "";
+				confirmBtn.disabled = false;
+				confirmBtn.textContent = "Archive all";
+			}
+		})();
+	});
+}
+
+async function doImproveProjectFlows(
+	slug: string,
+	name: string | undefined,
+	btn: HTMLButtonElement,
+): Promise<void> {
+	const label = name || slug;
+	btn.classList.add("is-busy");
+	btn.disabled = true;
+	log(`Building Improve prompt for ${label}…`, "info");
+	try {
+		const r = await req.improveSnapFlows({ slug });
+		if (!r.ok) {
+			log(`Improve failed for ${label}: ${r.error}`, "error");
+			return;
+		}
+		log(
+			`✨ Prompt copied (${r.summary}) — paste it into Claude, then paste Claude's JSON back here.`,
+			"success",
+		);
+		openImproveApplyModal(slug, label, r.flowsFilePath);
+	} catch (err) {
+		log(`Improve failed for ${label}: ${(err as Error).message}`, "error");
+	} finally {
+		btn.classList.remove("is-busy");
+		btn.disabled = false;
+	}
+}
+
+/**
+ * Modal that asks the user to paste Claude's response. Parses the JSON
+ * code fence, shows a quick preview (N flows, M routes), then calls
+ * applyFlowGrouping on confirm. Works for both web + mobile improver
+ * outputs since both emit the same JSON shape. The text area accepts
+ * either a raw JSON object or a full ```json ... ``` fenced block.
+ */
+function openImproveApplyModal(slug: string, label: string, hintPath: string): void {
+	const backdrop = ce("div", "rn-confirm-backdrop");
+	const dlg = ce("div", "rn-confirm-dialog");
+	const title = ce("h3", "rn-confirm-title");
+	title.textContent = `Apply Claude's grouping to "${label}"`;
+	const body = ce("p", "rn-confirm-body");
+	body.textContent =
+		`The prompt is already in your clipboard. Open Claude Code (or any LLM), paste it, then paste Claude's JSON response below. Capture will rename / regroup the flows in this project.`;
+	const hint = ce("p", "rn-confirm-body");
+	hint.style.fontSize = "11px";
+	hint.style.color = "var(--fg-3)";
+	hint.textContent = `Source of truth: orchestrator manifest (${hintPath.split("/").pop()})`;
+
+	const textareaLabel = ce("label", "rn-push-field-label");
+	textareaLabel.textContent = "Claude's response";
+	const textarea = ce("textarea", "input");
+	textarea.placeholder = '```json\n{\n  "flows": [\n    { "id": "auth", "name": "Auth", "routes": ["/sign-in"] }\n  ]\n}\n```';
+	textarea.rows = 12;
+	textarea.style.fontFamily = "var(--font-mono)";
+	textarea.style.fontSize = "12px";
+
+	const preview = ce("div", "rn-confirm-body");
+	preview.style.fontSize = "12px";
+	preview.style.color = "var(--fg-2)";
+	preview.style.display = "none";
+
+	const errorBox = ce("div", "rn-wizard-error");
+	errorBox.style.display = "none";
+
+	const actions = ce("div", "rn-confirm-actions");
+	const cancelBtn = ce("button", "btn btn-ghost");
+	cancelBtn.type = "button";
+	cancelBtn.textContent = "Cancel";
+	const applyBtn = ce("button", "btn btn-primary");
+	applyBtn.type = "button";
+	applyBtn.textContent = "Apply grouping";
+	applyBtn.disabled = true;
+	actions.append(cancelBtn, applyBtn);
+
+	dlg.append(title, body, hint, textareaLabel, textarea, preview, errorBox, actions);
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	let parsed: { flows: Array<{ id: string; name: string; routes: string[] }> } | null = null;
+
+	const onInput = (): void => {
+		const raw = textarea.value;
+		errorBox.style.display = "none";
+		preview.style.display = "none";
+		parsed = null;
+		applyBtn.disabled = true;
+		if (!raw.trim()) return;
+		try {
+			parsed = parseImproveResponse(raw);
+			const routeCount = parsed.flows.reduce((n, f) => n + (f.routes?.length ?? 0), 0);
+			preview.textContent = `→ ${parsed.flows.length} flow${parsed.flows.length === 1 ? "" : "s"}, ${routeCount} route${routeCount === 1 ? "" : "s"}. Click Apply to commit.`;
+			preview.style.display = "";
+			applyBtn.disabled = false;
+		} catch (err) {
+			errorBox.textContent = (err as Error).message;
+			errorBox.style.display = "";
+		}
+	};
+	textarea.addEventListener("input", onInput);
+
+	const close = (): void => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent): void => {
+		if (e.key === "Escape") close();
+	};
+	cancelBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+
+	applyBtn.addEventListener("click", () => {
+		if (!parsed) return;
+		applyBtn.disabled = true;
+		applyBtn.textContent = "Applying…";
+		void (async () => {
+			try {
+				const r = await req.applyFlowGrouping({ slug, groups: parsed!.flows });
+				if (!r.ok) {
+					errorBox.textContent = r.error;
+					errorBox.style.display = "";
+					applyBtn.disabled = false;
+					applyBtn.textContent = "Apply grouping";
+					return;
+				}
+				log(
+					`✓ Applied grouping — ${r.flowsApplied} flow${r.flowsApplied === 1 ? "" : "s"} touched, ${r.snapsMoved} snap${r.snapsMoved === 1 ? "" : "s"} moved`,
+					"success",
+				);
+				// Re-pull flows + snaps so the sidebar + library reflect the new
+				// tree without a full refresh.
+				try {
+					const status = await req.snapServerStatus({});
+					state.set((cur) => ({
+						...cur,
+						rn: { ...cur.rn, flows: status.flows, snaps: status.snaps },
+					}));
+				} catch {}
+				close();
+			} catch (err) {
+				errorBox.textContent = (err as Error).message;
+				errorBox.style.display = "";
+				applyBtn.disabled = false;
+				applyBtn.textContent = "Apply grouping";
+			}
+		})();
+	});
+
+	queueMicrotask(() => textarea.focus());
+}
+
+/**
+ * Extract the JSON object from Claude's response. Accepts:
+ *   - raw JSON ({ "flows": [...] })
+ *   - JSON wrapped in a ```json ... ``` code fence
+ *   - mobile-style snap-flows.ts contents (legacy mobile improver output)
+ *     — bail out with a clear hint to use the file-based mobile path instead
+ */
+function parseImproveResponse(
+	raw: string,
+): { flows: Array<{ id: string; name: string; routes: string[] }> } {
+	const trimmed = raw.trim();
+	let candidate = trimmed;
+	const fenceMatch = /```(?:json)?\s*\n?([\s\S]*?)\n?```/.exec(trimmed);
+	if (fenceMatch?.[1]) candidate = fenceMatch[1].trim();
+	if (candidate.startsWith("import ") || candidate.includes("SnapFlowsDeclaration")) {
+		throw new Error(
+			"That looks like a snap-flows.ts file — the apply-JSON path is for the JSON shape the web prompt produces. Mobile improver writes to snap-flows.ts directly.",
+		);
+	}
+	let obj: unknown;
+	try {
+		obj = JSON.parse(candidate);
+	} catch (err) {
+		throw new Error(`Not valid JSON: ${(err as Error).message}`);
+	}
+	if (!obj || typeof obj !== "object") {
+		throw new Error("JSON root must be an object with a `flows` array.");
+	}
+	const flows = (obj as { flows?: unknown }).flows;
+	if (!Array.isArray(flows)) {
+		throw new Error("Missing `flows` array at the JSON root.");
+	}
+	const cleaned: Array<{ id: string; name: string; routes: string[] }> = [];
+	for (const [idx, f] of flows.entries()) {
+		if (!f || typeof f !== "object") {
+			throw new Error(`flows[${idx}] is not an object.`);
+		}
+		const obj = f as Record<string, unknown>;
+		const name = typeof obj.name === "string" ? obj.name.trim() : "";
+		if (!name) throw new Error(`flows[${idx}].name is required.`);
+		const id = typeof obj.id === "string" ? obj.id.trim() : "";
+		const routes = Array.isArray(obj.routes)
+			? obj.routes.filter((r): r is string => typeof r === "string" && r.length > 0)
+			: [];
+		cleaned.push({ id, name, routes });
+	}
+	return { flows: cleaned };
 }
 
 async function doRemoveProject(slug: string, name?: string): Promise<void> {
@@ -3857,6 +5613,57 @@ async function doDeleteSnapVersion(
 	}
 }
 
+/**
+ * Pull frames + flows from the gallery for the current project. Imports
+ * any frames we don't already have as remote-only snaps (no PNG download)
+ * — the bezel renders straight from the Supabase URL until they're
+ * re-snapped locally.
+ *
+ * Idempotent: re-running brings down only what's new.
+ */
+async function doSyncFromGallery(): Promise<void> {
+	const cur = state.get().rn;
+	const slug = cur.selectedProjectSlug;
+	if (!slug) {
+		log("Open a project before syncing from gallery.", "warn");
+		return;
+	}
+	log(`Syncing from gallery…`, "info");
+	try {
+		const r = await req.syncFromGallery({ projectSlug: slug });
+		if (!r.ok) {
+			log(`Sync failed: ${r.error}`, "error");
+			return;
+		}
+		if (r.framesAdded === 0 && r.flowsAdded === 0 && r.flowsRemoved === 0) {
+			log("Already in sync — no new frames.", "info");
+		} else {
+			const parts: string[] = [];
+			if (r.framesAdded > 0)
+				parts.push(`${r.framesAdded} frame${r.framesAdded === 1 ? "" : "s"}`);
+			if (r.flowsAdded > 0)
+				parts.push(`${r.flowsAdded} flow${r.flowsAdded === 1 ? "" : "s"} added`);
+			if (r.flowsRemoved > 0)
+				parts.push(`${r.flowsRemoved} stale flow${r.flowsRemoved === 1 ? "" : "s"} pruned`);
+			log(`Sync: ${parts.join(", ")}.`, "success");
+		}
+		// Pull a fresh status so the UI re-renders with the new snaps.
+		try {
+			const status = await req.snapServerStatus({});
+			state.set((c) => ({
+				...c,
+				rn: {
+					...c.rn,
+					snaps: status.snaps,
+					pendingUploads: status.pendingUploads,
+				},
+			}));
+		} catch {}
+	} catch (err) {
+		log(`Sync failed: ${(err as Error).message}`, "error");
+	}
+}
+
 async function doPushPending(): Promise<void> {
 	if (state.get().rn.pushing) return; // double-click guard
 	const cur = state.get().rn;
@@ -3880,32 +5687,45 @@ async function doPushPending(): Promise<void> {
 
 	state.set((c) => ({ ...c, rn: { ...c.rn, pushing: true } }));
 	try {
-		const r = await req.pushAll({
-			projectSlug: slug ?? undefined,
-			message: message || undefined,
-		});
-		if (r.synced > 0) {
-			log(
-				`✓ Synced ${r.synced} snap${r.synced === 1 ? "" : "s"} — web now matches desktop`,
-				"success",
-			);
+		// Retry loop: showPushSummary can return "retry", which re-runs
+		// pushAll without rebuilding the dialog or re-asking for the
+		// message. Cap retries at 3 so a permanent failure doesn't trap
+		// the user — they can always close + manually retry.
+		let attempt = 0;
+		while (attempt < 3) {
+			attempt += 1;
+			const r = await req.pushAll({
+				projectSlug: slug ?? undefined,
+				message: message || undefined,
+			});
+			if (r.synced > 0) {
+				log(
+					`✓ Synced ${r.synced} snap${r.synced === 1 ? "" : "s"} — web now matches desktop`,
+					"success",
+				);
+			}
+			// Refresh status so cards pick up their new uploaded badges
+			// before the modal renders (the modal text references counts,
+			// not card state, but the underlying grid should be current).
+			try {
+				const status = await req.snapServerStatus({});
+				state.set((c) => ({
+					...c,
+					rn: {
+						...c.rn,
+						snaps: status.snaps,
+						pendingUploads: status.pendingUploads,
+					},
+				}));
+			} catch {}
+			const choice = await showPushSummary({
+				synced: r.synced,
+				failed: r.failed,
+				errors: r.errors,
+				skipped: r.skipped,
+			});
+			if (choice !== "retry") break;
 		}
-		if (r.failed > 0) {
-			log(`⚠ ${r.failed} snap${r.failed === 1 ? "" : "s"} failed:`, "error");
-			for (const e of r.errors.slice(0, 5)) log(`  ${e}`, "error");
-		}
-		// Refresh status so cards pick up their new uploaded badges.
-		try {
-			const status = await req.snapServerStatus({});
-			state.set((c) => ({
-				...c,
-				rn: {
-					...c.rn,
-					snaps: status.snaps,
-					pendingUploads: status.pendingUploads,
-				},
-			}));
-		} catch {}
 	} catch (err) {
 		log(`Push failed: ${(err as Error).message}`, "error");
 	} finally {
@@ -3973,6 +5793,183 @@ function showConfirm(opts: {
 		});
 		document.addEventListener("keydown", onKey);
 		queueMicrotask(() => okBtn.focus());
+	});
+}
+
+/**
+ * Post-push summary modal. Replaces the toast-only feedback the user got
+ * before: counts are prominent, errors and skipped frames live in their
+ * own labeled lists, and a `Try again` button is offered whenever any
+ * failure happened. On clean pushes (no failures, no skipped) the modal
+ * is suppressed when the user has ticked "Don't show again on clean
+ * pushes" — that preference persists in localStorage.
+ *
+ * Resolves with `"retry"` if the user picked the Try again button,
+ * otherwise `"close"`.
+ */
+const PUSH_SUMMARY_HIDE_CLEAN_KEY = "capture:push-summary:hide-clean";
+
+function showPushSummary(opts: {
+	synced: number;
+	failed: number;
+	errors: string[];
+	skipped: Array<{ projectId: string; image: string; reason: string; bytes?: number }>;
+}): Promise<"retry" | "close"> {
+	const isClean = opts.failed === 0 && opts.skipped.length === 0;
+	const hideClean =
+		localStorage.getItem(PUSH_SUMMARY_HIDE_CLEAN_KEY) === "1";
+	// Clean push + user opted out → no modal, immediate close.
+	if (isClean && hideClean) return Promise.resolve("close");
+
+	return new Promise((resolve) => {
+		const backdrop = document.createElement("div");
+		backdrop.className = "rn-confirm-backdrop";
+		const dlg = document.createElement("div");
+		dlg.className = "rn-confirm-dialog rn-push-summary-dialog";
+
+		const title = document.createElement("h3");
+		title.className = "rn-confirm-title";
+		title.textContent = isClean ? "Push complete" : "Push finished with issues";
+
+		// Counts header: "12 pushed · 1 failed · 2 skipped"
+		const counts = document.createElement("p");
+		counts.className = "rn-confirm-body";
+		const parts: string[] = [];
+		parts.push(
+			`${opts.synced} pushed`,
+		);
+		if (opts.failed > 0) parts.push(`${opts.failed} failed`);
+		if (opts.skipped.length > 0) parts.push(`${opts.skipped.length} skipped`);
+		counts.textContent = parts.join(" · ");
+
+		dlg.append(title, counts);
+
+		// Errors block — collapsible, shown when present.
+		if (opts.errors.length > 0) {
+			const details = document.createElement("details");
+			details.className = "rn-push-summary-details";
+			details.open = true;
+			const summary = document.createElement("summary");
+			summary.textContent = `Errors (${opts.errors.length})`;
+			details.appendChild(summary);
+			const list = document.createElement("ul");
+			list.className = "rn-push-summary-list";
+			for (const e of opts.errors.slice(0, 10)) {
+				const li = document.createElement("li");
+				li.textContent = e;
+				list.appendChild(li);
+			}
+			if (opts.errors.length > 10) {
+				const li = document.createElement("li");
+				li.className = "rn-push-summary-more";
+				li.textContent = `…and ${opts.errors.length - 10} more`;
+				list.appendChild(li);
+			}
+			details.appendChild(list);
+			dlg.appendChild(details);
+		}
+
+		// Skipped block — same pattern, different label so users can tell
+		// "we tried but the server rejected" (errors) from "we never tried
+		// because the local file was missing" (skipped).
+		if (opts.skipped.length > 0) {
+			const details = document.createElement("details");
+			details.className = "rn-push-summary-details";
+			details.open = opts.errors.length === 0; // open if it's the only issue
+			const summary = document.createElement("summary");
+			// Tally reasons so the header tells the user what kind of skip
+			// dominates without scrolling through the per-frame list.
+			const tooLarge = opts.skipped.filter((s) => s.reason === "too-large").length;
+			const missing = opts.skipped.filter((s) => s.reason === "missing-file").length;
+			const readErr = opts.skipped.filter((s) => s.reason === "read-error").length;
+			const tagParts: string[] = [];
+			if (tooLarge) tagParts.push(`${tooLarge} too large`);
+			if (missing) tagParts.push(`${missing} missing`);
+			if (readErr) tagParts.push(`${readErr} read errors`);
+			summary.textContent = `Skipped (${opts.skipped.length}) — ${tagParts.join(", ")}`;
+			details.appendChild(summary);
+			if (tooLarge > 0) {
+				const hint = document.createElement("p");
+				hint.className = "rn-push-summary-hint";
+				hint.textContent =
+					"Vercel rejects request bodies over 4.5 MB. Re-snap these as viewport (instead of full page), or shorten the page before snapping.";
+				details.appendChild(hint);
+			}
+			const list = document.createElement("ul");
+			list.className = "rn-push-summary-list";
+			for (const s of opts.skipped.slice(0, 10)) {
+				const li = document.createElement("li");
+				const sizeNote =
+					s.reason === "too-large" && s.bytes
+						? ` (${(s.bytes / 1_000_000).toFixed(1)} MB)`
+						: "";
+				li.textContent = `${s.image} — ${s.reason}${sizeNote}`;
+				list.appendChild(li);
+			}
+			if (opts.skipped.length > 10) {
+				const li = document.createElement("li");
+				li.className = "rn-push-summary-more";
+				li.textContent = `…and ${opts.skipped.length - 10} more`;
+				list.appendChild(li);
+			}
+			details.appendChild(list);
+			dlg.appendChild(details);
+		}
+
+		// "Don't show again on clean pushes" — only meaningful when
+		// THIS push was clean. Keeps power users from confirm-fatigue
+		// without hiding the modal on partial failures.
+		if (isClean) {
+			const optOutWrap = document.createElement("label");
+			optOutWrap.className = "rn-push-summary-optout";
+			const cb = document.createElement("input");
+			cb.type = "checkbox";
+			cb.checked = hideClean;
+			cb.addEventListener("change", () => {
+				localStorage.setItem(
+					PUSH_SUMMARY_HIDE_CLEAN_KEY,
+					cb.checked ? "1" : "0",
+				);
+			});
+			const labelText = document.createElement("span");
+			labelText.textContent = "Don't show again on clean pushes";
+			optOutWrap.append(cb, labelText);
+			dlg.appendChild(optOutWrap);
+		}
+
+		const actions = document.createElement("div");
+		actions.className = "rn-confirm-actions";
+		let retryBtn: HTMLButtonElement | null = null;
+		if (opts.failed > 0) {
+			retryBtn = document.createElement("button");
+			retryBtn.className = "btn btn-ghost";
+			retryBtn.textContent = "Try again";
+			actions.appendChild(retryBtn);
+		}
+		const closeBtn = document.createElement("button");
+		closeBtn.className = "btn btn-primary";
+		closeBtn.textContent = "Close";
+		actions.appendChild(closeBtn);
+		dlg.appendChild(actions);
+
+		backdrop.appendChild(dlg);
+		document.body.appendChild(backdrop);
+
+		const close = (result: "retry" | "close") => {
+			backdrop.remove();
+			document.removeEventListener("keydown", onKey);
+			resolve(result);
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape" || e.key === "Enter") close("close");
+		};
+		closeBtn.addEventListener("click", () => close("close"));
+		retryBtn?.addEventListener("click", () => close("retry"));
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close("close");
+		});
+		document.addEventListener("keydown", onKey);
+		queueMicrotask(() => closeBtn.focus());
 	});
 }
 
@@ -4084,6 +6081,118 @@ function showRefreshModePicker(
  * returned by `runDoctor` with status icons, a detail line per check,
  * and a Fix button when an auto-action is available.
  *
+/**
+ * Per-project settings sheet. Shows the gallery URL, masked project
+ * token, RN workspace path, last push timestamp, and current bridge
+ * connection — all the values that used to live invisibly in
+ * localStorage / the registry JSON. No write actions in v1 (re-add
+ * via "+ Add" if creds need to change); this is a transparency surface
+ * so a designer can confirm "yes, I'm pushing to the right place."
+ */
+function openProjectSettings(slug: string): void {
+	const s = state.get();
+	const proj = s.rn.registry.find((p) => p.slug === slug);
+	if (!proj) {
+		log(`No project with slug "${slug}"`, "error");
+		return;
+	}
+	const projectSnaps = s.rn.snaps.filter((n) => n.projectId === slug);
+	const lastPushIso =
+		projectSnaps
+			.map((n) => n.uploaded?.uploadedAt ?? "")
+			.filter((v) => v.length > 0)
+			.sort()
+			.pop() ?? "";
+	const bridgeConnected = s.rn.projects.includes(slug);
+	const maskToken = (t: string): string => {
+		if (!t) return "(not set)";
+		if (t.length <= 12) return "•".repeat(t.length);
+		return `${t.slice(0, 6)}${"•".repeat(t.length - 10)}${t.slice(-4)}`;
+	};
+	const fmtTs = (iso: string): string => {
+		if (!iso) return "Never";
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return iso;
+		return d.toLocaleString();
+	};
+
+	const backdrop = document.createElement("div");
+	backdrop.className = "rn-confirm-backdrop";
+	const dlg = document.createElement("div");
+	dlg.className = "rn-confirm-dialog rn-settings-dialog";
+
+	const title = document.createElement("h3");
+	title.className = "rn-confirm-title";
+	title.textContent = `${proj.name ?? proj.slug} — settings`;
+
+	const rows: Array<{ label: string; value: string; mono?: boolean }> = [
+		{ label: "Slug", value: proj.slug, mono: true },
+		{ label: "Platform", value: proj.platform },
+		{ label: "Gallery upload URL", value: proj.uploadUrl, mono: true },
+		{ label: "Project token", value: maskToken(proj.projectToken), mono: true },
+		...(proj.baseUrl
+			? [{ label: "Web base URL", value: proj.baseUrl, mono: true }]
+			: []),
+		...(proj.repoPath
+			? [{ label: "Repo path", value: proj.repoPath, mono: true }]
+			: []),
+		...(proj.rnAppDir
+			? [{ label: "RN app dir", value: proj.rnAppDir, mono: true }]
+			: []),
+		{ label: "Registered", value: fmtTs(proj.registeredAt) },
+		{ label: "Last push", value: fmtTs(lastPushIso) },
+		{
+			label: "Bridge",
+			value: bridgeConnected ? "Connected" : "Offline",
+		},
+	];
+
+	const grid = document.createElement("div");
+	grid.className = "rn-settings-grid";
+	for (const r of rows) {
+		const rowLabel = document.createElement("div");
+		rowLabel.className = "rn-settings-label";
+		rowLabel.textContent = r.label;
+		const rowValue = document.createElement("div");
+		rowValue.className = r.mono
+			? "rn-settings-value rn-settings-value-mono"
+			: "rn-settings-value";
+		rowValue.textContent = r.value;
+		grid.append(rowLabel, rowValue);
+	}
+
+	const note = document.createElement("p");
+	note.className = "rn-confirm-body rn-settings-note";
+	note.textContent =
+		'To change the gallery URL, token, or repo path, re-onboard via "+ Add" with the same slug — Capture will detect the existing project and update its registry entry.';
+
+	const actions = document.createElement("div");
+	actions.className = "rn-confirm-actions";
+	const closeBtn = document.createElement("button");
+	closeBtn.className = "btn btn-primary";
+	closeBtn.textContent = "Close";
+	actions.appendChild(closeBtn);
+
+	dlg.append(title, grid, note, actions);
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = () => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent) => {
+		if (e.key === "Escape" || e.key === "Enter") close();
+	};
+	closeBtn.addEventListener("click", close);
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+	queueMicrotask(() => closeBtn.focus());
+}
+
+/**
  * Opening: from the dashboard card's stethoscope button. Doctor RPC
  * fires immediately so the user sees status by the time the modal is
  * fully rendered.
@@ -4105,8 +6214,8 @@ async function openDoctorPanel(slug: string, name?: string): Promise<void> {
 	sub.textContent = "Per-project health check. Findings + auto-fixes.";
 
 	const list = ce("ul", "rn-doctor-checks");
-	const summary = ce("div", "rn-doctor-summary");
-	summary.textContent = "Running…";
+	const summary = ce("div", "rn-doctor-summary with-spin-prefix");
+	summary.append(icon("loader", { size: 14 }), document.createTextNode("Running…"));
 
 	const actions = document.createElement("div");
 	actions.className = "rn-confirm-actions";
@@ -4115,7 +6224,7 @@ async function openDoctorPanel(slug: string, name?: string): Promise<void> {
 	closeBtn.textContent = "Close";
 	const refreshBtn = document.createElement("button");
 	refreshBtn.className = "btn btn-ghost";
-	refreshBtn.textContent = "Re-run";
+	setBtnIcon(refreshBtn, "refresh-cw", "Re-run");
 	actions.append(refreshBtn, closeBtn);
 
 	dlg.append(title, sub, summary, list, actions);
@@ -4137,8 +6246,16 @@ async function openDoctorPanel(slug: string, name?: string): Promise<void> {
 	refreshBtn.addEventListener("click", () => void runAudit());
 
 	const runAudit = async (): Promise<void> => {
-		summary.textContent = "Running…";
+		summary.classList.add("with-spin-prefix");
+		summary.replaceChildren(
+			icon("loader", { size: 14 }),
+			document.createTextNode("Running…"),
+		);
+		summary.removeAttribute("data-severity");
 		list.replaceChildren();
+		refreshBtn.classList.add("is-busy");
+		refreshBtn.disabled = true;
+		setBtnIcon(refreshBtn, "loader", "Re-run");
 		try {
 			const r = (await req.runDoctor({ slug })) as
 				| {
@@ -4165,6 +6282,7 @@ async function openDoctorPanel(slug: string, name?: string): Promise<void> {
 						};
 				  }
 				| { ok: false; error: string };
+			summary.classList.remove("with-spin-prefix");
 			if (!r.ok) {
 				summary.textContent = `Audit failed: ${r.error}`;
 				return;
@@ -4195,7 +6313,12 @@ async function openDoctorPanel(slug: string, name?: string): Promise<void> {
 				list.appendChild(li);
 			}
 		} catch (err) {
+			summary.classList.remove("with-spin-prefix");
 			summary.textContent = `Audit error: ${(err as Error).message}`;
+		} finally {
+			refreshBtn.classList.remove("is-busy");
+			refreshBtn.disabled = false;
+			setBtnIcon(refreshBtn, "refresh-cw", "Re-run");
 		}
 	};
 
@@ -4215,22 +6338,39 @@ async function openDoctorPanel(slug: string, name?: string): Promise<void> {
 			return;
 		}
 		if (kind === "manual") return;
+		const originalLabel = btn.textContent ?? "Fix";
 		btn.disabled = true;
-		btn.textContent = "Working…";
+		btn.classList.add("is-busy");
+		btn.replaceChildren(
+			icon("loader", { size: 12 }),
+			document.createTextNode("Working…"),
+		);
 		try {
 			const r = (await req.doctorAutoFix({ slug, kind })) as
 				| { ok: true; output: string }
 				| { ok: false; error: string };
 			if (!r.ok) {
 				log(`Fix failed: ${r.error}`, "error");
-				btn.textContent = "Failed — retry";
+				btn.classList.remove("is-busy");
+				btn.replaceChildren(document.createTextNode("Failed — retry"));
 				btn.disabled = false;
 				return;
 			}
-			log(`✓ Fix "${kind}" applied`, "success");
+			// Prefer the server's human-friendly output ("Opening Simulator.
+			// Your last-used device should boot…") over the generic "Fix
+			// applied" — for the runtime-state fixes (boot-simulator,
+			// launch-expo, reconnect-bridge) the output is the entire UX.
+			const msg =
+				typeof r.output === "string" && r.output.trim().length > 0
+					? r.output.trim()
+					: `✓ Fix "${kind}" applied`;
+			log(msg, "success");
+			// runAudit will rebuild the list, replacing this btn entirely.
 			void runAudit();
 		} catch (err) {
 			log(`Fix crashed: ${(err as Error).message}`, "error");
+			btn.classList.remove("is-busy");
+			btn.replaceChildren(document.createTextNode(originalLabel));
 			btn.disabled = false;
 		}
 	};
@@ -4368,10 +6508,28 @@ function applyRnState(s: AppState): void {
 		: r.flows;
 
 	const groups = groupSnapsByFlow(filteredSnaps, filteredFlows);
-	const visibleGroups = groups.filter(
+	const allNonEmptyGroups = groups.filter(
 		(g) => g.snaps.length > 0 || g.flow.id !== "__unassigned__",
 	);
+	// Hide empty declared flows by default — snap-flows.ts often declares
+	// 20-40 screens, most of which haven't been captured yet, and the
+	// noise drowns out the flows that have actual content. Toggle lives
+	// next to the "+ New flow" button; preference persists per project.
+	//
+	// User-created flows always show even when empty — clicking "+ New
+	// flow" should produce a visible row to rename + populate, not
+	// silently disappear. We treat a flow with a `declaredId` as
+	// bridge-declared (eligible for hiding); anything without one came
+	// from the user or from an auto-flow that already has snaps.
+	const showEmptyKey = `capture:show-empty-flows:${r.selectedProjectSlug ?? "_all"}`;
+	const showEmpty = readLocal(showEmptyKey) === "1";
+	const visibleGroups = showEmpty
+		? allNonEmptyGroups
+		: allNonEmptyGroups.filter(
+				(g) => g.snaps.length > 0 || !g.flow.declaredId,
+			);
 	const totalFrames = filteredSnaps.length;
+	const hiddenEmptyCount = allNonEmptyGroups.length - visibleGroups.length;
 
 	renderSidebarFlowTree(refs.flowsList, visibleGroups, refs.previewBox);
 
@@ -4379,12 +6537,32 @@ function applyRnState(s: AppState): void {
 	const overviewTitle = ce("h2", "rn-overview-title");
 	overviewTitle.textContent = "All flows";
 	const overviewSub = ce("p", "rn-overview-sub");
-	overviewSub.textContent = `${visibleGroups.length} flow${visibleGroups.length === 1 ? "" : "s"} · ${totalFrames} frame${totalFrames === 1 ? "" : "s"}`;
+	const subText = `${visibleGroups.length} flow${visibleGroups.length === 1 ? "" : "s"} · ${totalFrames} frame${totalFrames === 1 ? "" : "s"}`;
+	overviewSub.textContent = hiddenEmptyCount > 0
+		? `${subText} · ${hiddenEmptyCount} empty hidden`
+		: subText;
 	const newFlowBtn = ce("button", "btn btn-secondary btn-sm rn-new-flow-btn");
 	newFlowBtn.textContent = "+ New flow";
 	newFlowBtn.title = "Create an empty flow";
 	newFlowBtn.addEventListener("click", () => void doCreateFlow());
+	// Toggle for empty flows. Only useful when there are some to hide;
+	// suppress otherwise to keep the toolbar minimal.
 	const overviewActions = ce("div", "rn-overview-actions");
+	if (hiddenEmptyCount > 0 || showEmpty) {
+		const toggleEmptyBtn = ce("button", "btn btn-ghost btn-sm");
+		toggleEmptyBtn.type = "button";
+		toggleEmptyBtn.textContent = showEmpty
+			? "Hide empty"
+			: `Show empty (${hiddenEmptyCount})`;
+		toggleEmptyBtn.title = showEmpty
+			? "Hide declared flows that have no captures yet"
+			: "Show declared flows that have no captures yet";
+		toggleEmptyBtn.addEventListener("click", () => {
+			writeLocal(showEmptyKey, showEmpty ? "0" : "1");
+			applyRnState(state.get());
+		});
+		overviewActions.appendChild(toggleEmptyBtn);
+	}
 	overviewActions.appendChild(newFlowBtn);
 	const overviewMeta = ce("div", "rn-overview-meta");
 	overviewMeta.append(overviewTitle, overviewSub);
@@ -4410,16 +6588,30 @@ function applyRnState(s: AppState): void {
 		isSub: boolean,
 	): void => {
 		const flowId = group.flow.id;
+		const parentFlowId = group.flow.parentFlowId;
 		const section = ce("section", isSub ? "rn-flow-section rn-flow-sub" : "rn-flow-section");
 		section.dataset.flowId = flowId;
+		section.dataset.parentFlowId = parentFlowId ?? "";
 		// Section-level drag/drop for flow reordering. The grab handle in
 		// the flow head sets `flowDragSrcId` on dragstart; this section
 		// listens for dragover to show the drop indicator and for drop to
-		// commit the new order. Sub-flows skip this for now — only top-
-		// level flow reorder is supported.
-		if (flowId !== "__unassigned__" && !isSub) {
+		// commit the new order. Sub-flow reorder is sibling-scoped — drop
+		// only fires when source and target share the same parentFlowId,
+		// so a sub-flow can't accidentally be promoted to top-level or
+		// adopted by another parent via drag.
+		if (flowId !== "__unassigned__") {
 			section.addEventListener("dragover", (ev) => {
+				// Snap-card drag (dragSrc set) — let the section be a fallback
+				// drop target so the user can release ANYWHERE in the section,
+				// not only on the narrow strip band. Drop indicator stays on
+				// the strip/li level so visual feedback isn't noisy.
+				if (dragSrc) {
+					ev.preventDefault();
+					if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+					return;
+				}
 				if (!flowDragSrcId || flowDragSrcId === flowId) return;
+				if (flowDragSrcParent !== (parentFlowId ?? null)) return; // siblings only
 				ev.preventDefault();
 				if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
 				const rect = section.getBoundingClientRect();
@@ -4438,17 +6630,35 @@ function applyRnState(s: AppState): void {
 				}
 			});
 			section.addEventListener("drop", (ev) => {
+				// Snap-card fallback drop: if a strip/li deeper in the tree
+				// already handled the drop, its drag end will have cleared
+				// dragSrc by the time the bubble reaches here. So we only
+				// commit the move when dragSrc is still set — meaning no
+				// inner target accepted, but the cursor is over this
+				// section's body.
+				if (dragSrc) {
+					ev.preventDefault();
+					if (dragSrc.flowId !== flowId) {
+						// Cross-flow move into this section. Append at end —
+						// fine-grained ordering is handled by intra-strip drops.
+						const destSnaps = group.snaps;
+						handleStripDrop(flowId, null, destSnaps);
+					}
+					return;
+				}
 				if (!flowDragSrcId || flowDragSrcId === flowId) return;
+				if (flowDragSrcParent !== (parentFlowId ?? null)) return;
 				ev.preventDefault();
 				const above = section.classList.contains("drop-above");
 				section.classList.remove("drop-above", "drop-below");
-				const cur = state.get().rn.flows;
-				const orderedIds = cur.map((f) => f.id).filter((id) => id !== flowDragSrcId);
-				let toIdx = orderedIds.indexOf(flowId);
-				if (toIdx === -1) toIdx = orderedIds.length;
-				if (!above) toIdx += 1;
-				orderedIds.splice(toIdx, 0, flowDragSrcId);
+				const orderedIds = reorderSiblings(
+					state.get().rn.flows,
+					flowDragSrcId,
+					flowId,
+					above,
+				);
 				flowDragSrcId = null;
+				flowDragSrcParent = null;
 				void doReorderFlows(orderedIds);
 			});
 		}
@@ -4456,14 +6666,16 @@ function applyRnState(s: AppState): void {
 		const flowHead = ce("div", "rn-flow-head");
 		// Grab handle — only it triggers flow drag, so the rest of the head
 		// (title, count, delete button) stays clickable without misfires.
-		// Sub-flows don't get a grab handle since reorder is top-level only.
-		if (flowId !== "__unassigned__" && !isSub) {
+		if (flowId !== "__unassigned__") {
 			const grabHandle = ce("span", "rn-flow-grab");
-			grabHandle.title = "Drag to reorder this flow";
+			grabHandle.title = isSub
+				? "Drag to reorder among sibling sub-flows"
+				: "Drag to reorder this flow";
 			grabHandle.textContent = "⋮⋮";
 			grabHandle.draggable = true;
 			grabHandle.addEventListener("dragstart", (ev) => {
 				flowDragSrcId = flowId;
+				flowDragSrcParent = parentFlowId ?? null;
 				section.classList.add("flow-dragging");
 				if (ev.dataTransfer) {
 					ev.dataTransfer.effectAllowed = "move";
@@ -4478,6 +6690,7 @@ function applyRnState(s: AppState): void {
 					el.classList.remove("drop-above", "drop-below");
 				}
 				flowDragSrcId = null;
+				flowDragSrcParent = null;
 			});
 			flowHead.appendChild(grabHandle);
 		}
@@ -4533,6 +6746,35 @@ function applyRnState(s: AppState): void {
 		const flowCount = ce("span", "rn-flow-count");
 		flowCount.textContent = `${group.snaps.length} frame${group.snaps.length === 1 ? "" : "s"}`;
 		flowActions.appendChild(flowCount);
+		// Capture-into-this-flow: split button. Main button = auto-snap
+		// (route match in this flow replaces, otherwise appends). Caret =
+		// dropdown with "Snap as variant" so the user can force a new card
+		// on the same slot — required when capturing long pages or filter
+		// states scoped to this flow. Mirrors the global Snap split button.
+		if (flowId !== "__unassigned__") {
+			const flowSnapGroup = ce("div", "rn-flow-snap-group");
+			const flowSnapBtn = ce("button", "btn btn-ghost btn-sm rn-flow-snap rn-flow-snap-main");
+			flowSnapBtn.type = "button";
+			flowSnapBtn.append(icon("camera", { size: 14 }), document.createTextNode("Capture"));
+			flowSnapBtn.title = `Capture current screen into "${group.flow.name}"`;
+			flowSnapBtn.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				ev.preventDefault();
+				void doSnap("auto", { forceFlowId: flowId });
+			});
+			const flowSnapCaret = ce("button", "btn btn-ghost btn-sm rn-flow-snap-caret");
+			flowSnapCaret.type = "button";
+			flowSnapCaret.setAttribute("aria-label", "Snap options");
+			flowSnapCaret.title = "Snap options (variant capture)";
+			flowSnapCaret.appendChild(icon("chevron-down", { size: 12 }));
+			flowSnapCaret.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				ev.preventDefault();
+				openSnapMenu(flowSnapCaret, { forceFlowId: flowId });
+			});
+			flowSnapGroup.append(flowSnapBtn, flowSnapCaret);
+			flowActions.appendChild(flowSnapGroup);
+		}
 		// + Sub-flow available on any real flow — sub-flows can nest arbitrarily deep.
 		if (flowId !== "__unassigned__") {
 			const subFlowBtn = ce("button", "btn btn-ghost btn-sm rn-flow-add-sub");
@@ -4606,6 +6848,7 @@ function applyRnState(s: AppState): void {
 				return;
 			}
 			ev.preventDefault();
+			ev.stopPropagation(); // prevent section's fallback drop from re-firing
 			strip.classList.remove("drop-target");
 			handleStripDrop(flowId, null, groupSnapsSnapshot);
 		});
@@ -4668,6 +6911,7 @@ function applyRnState(s: AppState): void {
 			li.addEventListener("drop", (ev) => {
 				if (!dragSrc) return;
 				ev.preventDefault();
+				ev.stopPropagation(); // prevent strip + section fallback re-fire
 				const dropBefore = li.classList.contains("drop-before");
 				li.classList.remove("drop-before", "drop-after");
 				const targetKey = `${snap.sessionId}#${snap.sequence}`;
@@ -4722,6 +6966,9 @@ function applyRnState(s: AppState): void {
 			card.addEventListener("click", (ev) => {
 				const target = ev.target as HTMLElement;
 				if (target.closest(".rn-card-delete")) return;
+				if (target.closest(".rn-card-name")) return;
+				// Lightbox would also fail to load — skip the click entirely.
+				if (card.classList.contains("rn-card-missing")) return;
 				writeLocal(seenKey, String(versionCount));
 				if (versionBadge && versionBadge.isConnected) {
 					versionBadge.classList.add("is-leaving");
@@ -4736,6 +6983,40 @@ function applyRnState(s: AppState): void {
 			img.src = snapImageSrc(snap);
 			img.alt = `${snap.route} #${snap.sequence}`;
 			img.loading = "lazy";
+			// When the PNG behind this snap is missing on disk (stale record
+			// from a deleted/moved file), hide the broken-image glyph and
+			// stamp a clear "missing" hint on the bezel. The card's × delete
+			// button still works to prune the record. Card click is disabled
+			// for missing snaps since the lightbox would also be broken.
+			img.addEventListener("error", () => {
+				img.style.display = "none";
+				card.classList.add("rn-card-missing");
+				card.title = "Screenshot file missing on disk — click × to remove this stale snap";
+				card.style.cursor = "default";
+				bezelScreen.style.display = "flex";
+				bezelScreen.style.alignItems = "center";
+				bezelScreen.style.justifyContent = "center";
+				bezelScreen.style.flexDirection = "column";
+				bezelScreen.style.gap = "6px";
+				bezelScreen.style.color = "rgba(255,255,255,0.6)";
+				bezelScreen.style.textAlign = "center";
+				bezelScreen.style.padding = "16px";
+				const icon = ce("div");
+				icon.textContent = "⚠";
+				icon.style.fontSize = "28px";
+				icon.style.lineHeight = "1";
+				icon.style.color = "rgba(255,180,90,0.85)";
+				const label = ce("div");
+				label.textContent = "File missing";
+				label.style.fontSize = "12px";
+				label.style.fontWeight = "600";
+				label.style.letterSpacing = "0.04em";
+				const sub = ce("div");
+				sub.textContent = "Click × to remove";
+				sub.style.fontSize = "10px";
+				sub.style.opacity = "0.7";
+				bezelScreen.append(icon, label, sub);
+			});
 			bezelScreen.appendChild(img);
 			const bezelLight = ce("img", "rn-bezel-frame rn-bezel-frame-light");
 			bezelLight.src = "iphone-17.png";
@@ -4747,7 +7028,43 @@ function applyRnState(s: AppState): void {
 
 			const cardLabel = ce("div", "rn-card-label");
 			const cardName = ce("p", "rn-card-name");
-			cardName.textContent = snap.route || "/";
+			const currentSnapLabel = snap.displayName || snap.route || "/";
+			cardName.textContent = currentSnapLabel;
+			cardName.contentEditable = "plaintext-only";
+			cardName.spellcheck = false;
+			cardName.title = "Click to rename — Enter saves, Esc cancels";
+			cardName.draggable = false;
+			// Click bubbles to the card (opens lightbox) and dragstart would
+			// be hijacked by the parent — guard against both.
+			cardName.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+			cardName.addEventListener("dragstart", (ev) => ev.preventDefault());
+			cardName.addEventListener("click", (ev) => ev.stopPropagation());
+			cardName.addEventListener("focus", () => {
+				cardName.classList.add("editing");
+				const sel = window.getSelection();
+				if (sel) {
+					const range = document.createRange();
+					range.selectNodeContents(cardName);
+					sel.removeAllRanges();
+					sel.addRange(range);
+				}
+			});
+			cardName.addEventListener("blur", () => {
+				cardName.classList.remove("editing");
+				const next = cardName.textContent?.trim() ?? "";
+				if (next === currentSnapLabel) return;
+				void doRenameSnap(snap.sessionId, snap.sequence, next);
+			});
+			cardName.addEventListener("keydown", (ev) => {
+				if (ev.key === "Enter") {
+					ev.preventDefault();
+					cardName.blur();
+				} else if (ev.key === "Escape") {
+					ev.preventDefault();
+					cardName.textContent = currentSnapLabel;
+					cardName.blur();
+				}
+			});
 			const cardSub = ce("p", "rn-card-sub");
 			cardSub.textContent = new Date(snap.capturedAt).toLocaleTimeString();
 			cardLabel.append(cardName, cardSub);
@@ -4767,7 +7084,10 @@ function applyRnState(s: AppState): void {
 
 		// Placeholders for declared screens that don't have a captured
 		// snap yet — gray dashed cards labeled with the expected name.
-		const declaredScreens = group.flow.screens ?? [];
+		// Hidden screens (user soft-deleted them) drop out here.
+		const declaredScreens = (group.flow.screens ?? []).filter(
+			(s) => !s.hidden,
+		);
 		const missingScreens = declaredScreens.filter(
 			(s) =>
 				!group.snaps.some((snap) =>
@@ -4795,13 +7115,58 @@ function applyRnState(s: AppState): void {
 			bezelDark.src = "iphone-17-dark.png";
 			bezelDark.alt = "";
 			bezel.append(bezelScreen, bezelLight, bezelDark);
+			const deletePlaceholderBtn = ce("button", "rn-card-delete");
+			deletePlaceholderBtn.type = "button";
+			deletePlaceholderBtn.title = "Hide this placeholder";
+			deletePlaceholderBtn.setAttribute("aria-label", "Hide placeholder");
+			deletePlaceholderBtn.textContent = "×";
+			deletePlaceholderBtn.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				ev.preventDefault();
+				void doHideScreen(flowId, screen.declaredId);
+			});
 			const cardLabel = ce("div", "rn-card-label");
 			const cardName = ce("p", "rn-card-name");
-			cardName.textContent = screen.name || screen.route;
+			const currentScreenLabel = screen.name || screen.route;
+			cardName.textContent = currentScreenLabel;
+			cardName.contentEditable = "plaintext-only";
+			cardName.spellcheck = false;
+			cardName.title = "Click to rename — Enter saves, Esc cancels";
+			cardName.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+			cardName.addEventListener("click", (ev) => ev.stopPropagation());
+			cardName.addEventListener("focus", () => {
+				cardName.classList.add("editing");
+				const sel = window.getSelection();
+				if (sel) {
+					const range = document.createRange();
+					range.selectNodeContents(cardName);
+					sel.removeAllRanges();
+					sel.addRange(range);
+				}
+			});
+			cardName.addEventListener("blur", () => {
+				cardName.classList.remove("editing");
+				const next = cardName.textContent?.trim() ?? "";
+				if (!next || next === currentScreenLabel) {
+					cardName.textContent = currentScreenLabel;
+					return;
+				}
+				void doRenameScreen(flowId, screen.declaredId, next);
+			});
+			cardName.addEventListener("keydown", (ev) => {
+				if (ev.key === "Enter") {
+					ev.preventDefault();
+					cardName.blur();
+				} else if (ev.key === "Escape") {
+					ev.preventDefault();
+					cardName.textContent = currentScreenLabel;
+					cardName.blur();
+				}
+			});
 			const cardSub = ce("p", "rn-card-sub");
 			cardSub.textContent = screen.route;
 			cardLabel.append(cardName, cardSub);
-			card.append(bezel, cardLabel);
+			card.append(deletePlaceholderBtn, bezel, cardLabel);
 			li.appendChild(card);
 			strip.appendChild(li);
 		}
@@ -4910,19 +7275,81 @@ function renderSidebarFlowTree(
 	const countSnaps = (g: RnFlowGroup): number =>
 		g.snaps.length + g.children.reduce((n, c) => n + countSnaps(c), 0);
 
-	// "Pending" = snap not yet uploaded OR last upload failed. Shows the
-	// designer what hasn't made it to the web yet before they push.
-	const isPending = (s: RnSnapInfo): boolean =>
-		!s.uploaded || s.uploaded.ok === false;
-	const countPending = (g: RnFlowGroup): number =>
-		g.snaps.filter(isPending).length +
-		g.children.reduce((n, c) => n + countPending(c), 0);
+	// "Unseen" = snaps captured since the last time the user clicked into
+	// this flow. localStorage stores the snap count as of that click; the
+	// badge clears when the user views the flow and re-appears after fresh
+	// captures. Recurses so a parent's badge surfaces what's new anywhere
+	// underneath — clicking the parent clears the whole subtree.
+	const readSeen = (flowId: string): number =>
+		Number(readLocal(`prisma:flow-seen:${flowId}`) || "0") || 0;
+	const writeSeen = (flowId: string, count: number): void =>
+		writeLocal(`prisma:flow-seen:${flowId}`, String(count));
+	const ownUnseen = (g: RnFlowGroup): number =>
+		Math.max(0, g.snaps.length - readSeen(g.flow.id));
+	const countUnseen = (g: RnFlowGroup): number =>
+		ownUnseen(g) + g.children.reduce((n, c) => n + countUnseen(c), 0);
+	const markSeenRecursive = (g: RnFlowGroup): void => {
+		writeSeen(g.flow.id, g.snaps.length);
+		for (const c of g.children) markSeenRecursive(c);
+	};
 
 	const renderRow = (g: RnFlowGroup, depth: number): void => {
-		const row = ce("button", "rn-flow-row");
-		row.type = "button";
-		row.dataset.targetFlowId = g.flow.id;
-		row.style.paddingLeft = `${10 + depth * 14}px`;
+		const flowId = g.flow.id;
+		const parentFlowId = g.flow.parentFlowId;
+		const row = ce("div", "rn-flow-row");
+		row.dataset.targetFlowId = flowId;
+		row.dataset.parentFlowId = parentFlowId ?? "";
+		row.style.paddingLeft = `${4 + depth * 14}px`;
+		row.setAttribute("role", "button");
+		row.tabIndex = 0;
+		row.addEventListener("keydown", (ev) => {
+			if (ev.key === "Enter" || ev.key === " ") {
+				ev.preventDefault();
+				row.click();
+			}
+		});
+
+		// Sibling-scoped drag/drop, mirrors the main-area flow section
+		// behavior. Same `flowDragSrcId` + `flowDragSrcParent` state, so a
+		// reorder triggered from the sidebar is indistinguishable from one
+		// in the grid and Both surfaces stay in sync.
+		const draggable = flowId !== "__unassigned__";
+		if (draggable) {
+			row.addEventListener("dragover", (ev) => {
+				if (!flowDragSrcId || flowDragSrcId === flowId) return;
+				if (flowDragSrcParent !== (parentFlowId ?? null)) return;
+				ev.preventDefault();
+				if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+				const rect = row.getBoundingClientRect();
+				const above = ev.clientY < rect.top + rect.height / 2;
+				for (const el of host.querySelectorAll(".drop-above, .drop-below")) {
+					if (el !== row) el.classList.remove("drop-above", "drop-below");
+				}
+				row.classList.toggle("drop-above", above);
+				row.classList.toggle("drop-below", !above);
+			});
+			row.addEventListener("dragleave", (ev) => {
+				if (ev.target === row) {
+					row.classList.remove("drop-above", "drop-below");
+				}
+			});
+			row.addEventListener("drop", (ev) => {
+				if (!flowDragSrcId || flowDragSrcId === flowId) return;
+				if (flowDragSrcParent !== (parentFlowId ?? null)) return;
+				ev.preventDefault();
+				const above = row.classList.contains("drop-above");
+				row.classList.remove("drop-above", "drop-below");
+				const orderedIds = reorderSiblings(
+					state.get().rn.flows,
+					flowDragSrcId,
+					flowId,
+					above,
+				);
+				flowDragSrcId = null;
+				flowDragSrcParent = null;
+				void doReorderFlows(orderedIds);
+			});
+		}
 
 		if (depth > 0) {
 			const arrow = ce("span", "rn-flow-arrow");
@@ -4930,14 +7357,43 @@ function renderSidebarFlowTree(
 			row.appendChild(arrow);
 		}
 
+		// Grab handle is hidden until hover; activates row-level drag without
+		// clobbering the click-to-scroll on the rest of the row.
+		if (draggable) {
+			const grab = ce("span", "rn-flow-row-grab");
+			grab.title = parentFlowId
+				? "Drag to reorder among sibling sub-flows"
+				: "Drag to reorder this flow";
+			grab.textContent = "⋮⋮";
+			grab.draggable = true;
+			grab.addEventListener("dragstart", (ev) => {
+				flowDragSrcId = flowId;
+				flowDragSrcParent = parentFlowId ?? null;
+				row.classList.add("flow-dragging");
+				if (ev.dataTransfer) {
+					ev.dataTransfer.effectAllowed = "move";
+					ev.dataTransfer.setData("text/plain", `flow:${flowId}`);
+				}
+			});
+			grab.addEventListener("dragend", () => {
+				row.classList.remove("flow-dragging");
+				for (const el of host.querySelectorAll(".drop-above, .drop-below")) {
+					el.classList.remove("drop-above", "drop-below");
+				}
+				flowDragSrcId = null;
+				flowDragSrcParent = null;
+			});
+			row.appendChild(grab);
+		}
+
 		const name = ce("span", "rn-flow-name");
 		name.textContent = g.flow.name;
 
-		const pending = countPending(g);
-		if (pending > 0) {
+		const unseen = countUnseen(g);
+		if (unseen > 0) {
 			const dot = ce("span", "rn-flow-pending");
-			dot.title = `${pending} not pushed yet`;
-			dot.textContent = `•${pending}`;
+			dot.title = `${unseen} new snap${unseen === 1 ? "" : "s"} since you last viewed this flow`;
+			dot.textContent = `•${unseen}`;
 			row.appendChild(name);
 			row.appendChild(dot);
 		} else {
@@ -4948,17 +7404,92 @@ function renderSidebarFlowTree(
 		count.textContent = String(countSnaps(g));
 		row.append(count);
 
-		row.addEventListener("click", () => {
+		// Re-parent on drop: dragging a flow's grab handle onto another row
+		// makes the target the new parent. Rejects self + descendant drops
+		// so the tree can't loop.
+		const isDescendantOf = (
+			ancestorId: string,
+			candidateId: string,
+		): boolean => {
+			const flows = state.get().rn.flows;
+			let cursor: string | undefined = flows.find(
+				(f) => f.id === candidateId,
+			)?.parentFlowId;
+			while (cursor) {
+				if (cursor === ancestorId) return true;
+				cursor = flows.find((f) => f.id === cursor)?.parentFlowId;
+			}
+			return false;
+		};
+		const isValidReparentTarget = (): boolean => {
+			if (!flowDragSrcId) return false;
+			if (flowDragSrcId === flowId) return false;
+			if (isDescendantOf(flowDragSrcId, flowId)) return false;
+			const src = state.get().rn.flows.find((f) => f.id === flowDragSrcId);
+			if (src?.parentFlowId === flowId) return false;
+			return true;
+		};
+		const clearOntoStyle = (): void => {
+			row.classList.remove("rn-flow-row-onto");
+			row.style.outline = "";
+			row.style.outlineOffset = "";
+			row.style.borderRadius = "";
+		};
+		row.addEventListener("dragover", (ev) => {
+			if (!isValidReparentTarget()) return;
+			ev.preventDefault();
+			ev.stopPropagation();
+			if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+			for (const el of host.querySelectorAll<HTMLElement>(
+				".rn-flow-row-onto",
+			)) {
+				if (el !== row) {
+					el.classList.remove("rn-flow-row-onto");
+					el.style.outline = "";
+					el.style.outlineOffset = "";
+					el.style.borderRadius = "";
+				}
+			}
+			row.classList.add("rn-flow-row-onto");
+			row.style.outline = "2px solid var(--accent, #4f8cff)";
+			row.style.outlineOffset = "-2px";
+			row.style.borderRadius = "6px";
+		});
+		row.addEventListener("dragleave", (ev) => {
+			if (ev.target !== row) return;
+			clearOntoStyle();
+		});
+		row.addEventListener("drop", (ev) => {
+			if (!isValidReparentTarget()) return;
+			ev.preventDefault();
+			ev.stopPropagation();
+			const src = flowDragSrcId;
+			clearOntoStyle();
+			flowDragSrcId = null;
+			flowDragSrcParent = null;
+			if (src) void doReparentFlow(src, flowId);
+		});
+
+		row.addEventListener("click", (ev) => {
+			// Ignore clicks that originate inside the grab handle so dragstart
+			// doesn't also scroll the main area.
+			if ((ev.target as HTMLElement | null)?.classList.contains("rn-flow-row-grab")) {
+				return;
+			}
 			const target = scroller.querySelector<HTMLElement>(
-				`[data-flow-id="${cssEscape(g.flow.id)}"]`,
+				`[data-flow-id="${cssEscape(flowId)}"]`,
 			);
 			if (!target) return;
 			target.scrollIntoView({ behavior: "smooth", block: "start" });
-			// Flash highlight + mark active in sidebar
-			for (const el of host.querySelectorAll(".rn-flow-row.active")) {
-				el.classList.remove("active");
-			}
-			row.classList.add("active");
+			// Mark this flow + all its descendants as seen, then re-render the
+			// sidebar so badges update on the clicked row AND on any ancestor
+			// that was only badged because of something underneath.
+			markSeenRecursive(g);
+			renderSidebarFlowTree(host, groups, scroller);
+			const refreshed = host.querySelector<HTMLElement>(
+				`.rn-flow-row[data-target-flow-id="${cssEscape(flowId)}"]`,
+			);
+			refreshed?.classList.add("active");
 			target.classList.add("rn-flow-flash");
 			window.setTimeout(() => target.classList.remove("rn-flow-flash"), 900);
 		});
@@ -5014,9 +7545,36 @@ function openSnapLightbox(
 	closeBtn.textContent = "×";
 
 	const header = ce("div", "rn-lightbox-header");
+	const headerText = ce("div", "rn-lightbox-header-text");
 	const title = ce("div", "rn-lightbox-title");
 	const sub = ce("div", "rn-lightbox-sub");
-	header.append(title, sub);
+	headerText.append(title, sub);
+	// Re-snap this specific screen: forces the current bridge frame to
+	// REPLACE this record's image regardless of route/state. The lightbox
+	// closes after a successful capture; the user can click the card again
+	// to see the new version (and the previous image is preserved in
+	// `versions[]`).
+	const snapThisBtn = ce("button", "btn btn-primary btn-sm rn-lightbox-snap");
+	snapThisBtn.type = "button";
+	snapThisBtn.append(icon("camera", { size: 14 }), document.createTextNode("Re-snap"));
+	snapThisBtn.title = "Capture the current bridge frame and replace this screen's image";
+	snapThisBtn.addEventListener("click", async () => {
+		const cur = siblings[idx];
+		if (!cur) return;
+		snapThisBtn.disabled = true;
+		try {
+			await doSnap("auto", {
+				forceScreen: {
+					sessionId: cur.sessionId,
+					sequence: cur.sequence,
+				},
+			});
+		} finally {
+			snapThisBtn.disabled = false;
+		}
+		closeSnapLightbox();
+	});
+	header.append(headerText, snapThisBtn);
 
 	const stageMain = ce("div", "rn-lightbox-main");
 
@@ -5061,12 +7619,12 @@ function openSnapLightbox(
 	inspUploadLabel.textContent = "Upload";
 	const inspUpload = ce("div", "rn-insp-upload");
 
-	// Full-page capture toggle row. Surfaces an "Enable long-page capture
-	// for <route>" affordance so the designer can opt this one screen
-	// into bridge full-page mode without dropping into a terminal.
-	const inspFullPageLabel = ce("div", "rn-insp-label");
-	inspFullPageLabel.textContent = "Long-page";
-	const inspFullPage = ce("div", "rn-insp-fullpage");
+	// Long-page row paused. For now, the recommended workflow on a long
+	// scrollable page is to take multiple variant snaps (⌘⇧V) — top,
+	// middle, bottom — and they cluster under the same route in the
+	// timeline. The doToggleFullPage handler + wrap-screen CLI + bridge
+	// full-page path all stay wired in the codebase for the eventual
+	// re-enable.
 	inspector.append(
 		inspRouteLabel,
 		inspRoute,
@@ -5078,8 +7636,6 @@ function openSnapLightbox(
 		inspState,
 		inspUploadLabel,
 		inspUpload,
-		inspFullPageLabel,
-		inspFullPage,
 	);
 
 	// Version scrubber strip — sits below the bezel inside stageMain.
@@ -5109,11 +7665,17 @@ function openSnapLightbox(
 	 * sibling at the active version index. Centralizes the "what is shown
 	 * right now" logic so the bezel + inspector + counter agree.
 	 */
-	const activeVersion = (): { imagePath: string; capturedAt: string; navStack?: string[] } => {
+	const activeVersion = (): {
+		imagePath: string;
+		remoteImageUrl?: string;
+		capturedAt: string;
+		navStack?: string[];
+	} => {
 		const cur = siblings[idx]!;
 		if (versionIdx === 0) {
 			return {
 				imagePath: cur.imagePath,
+				remoteImageUrl: cur.remoteImageUrl,
 				capturedAt: cur.capturedAt,
 				navStack: cur.navStack,
 			};
@@ -5122,6 +7684,7 @@ function openSnapLightbox(
 		if (!v) {
 			return {
 				imagePath: cur.imagePath,
+				remoteImageUrl: cur.remoteImageUrl,
 				capturedAt: cur.capturedAt,
 				navStack: cur.navStack,
 			};
@@ -5190,7 +7753,7 @@ function openSnapLightbox(
 		if (versionIdx >= versionTotal) versionIdx = 0;
 
 		const v = activeVersion();
-		img.src = toFileUrl(v.imagePath);
+		img.src = snapImageSrc(v);
 		title.textContent = cur.route || "/";
 		const versionTag =
 			versionIdx === 0
@@ -5223,29 +7786,10 @@ function openSnapLightbox(
 		inspUpload.append(dot, text);
 
 		// Long-page capture row. We can't reliably introspect whether the
-		// customer's screen file already has a snap-target wrap from here
-		// (would need a fingerprint per snap), so we offer both Enable +
-		// Disable buttons; the CLI handles "already wrapped" / "not
-		// wrapped" idempotently and surfaces the result via toast.
-		inspFullPage.replaceChildren();
-		const fpHint = ce("p", "rn-insp-fullpage-hint");
-		fpHint.textContent =
-			"Enable to capture this screen end-to-end (off-screen content too) on next snap.";
-		const fpRow = ce("div", "rn-insp-fullpage-row");
-		const fpEnable = ce("button", "rn-insp-fullpage-btn");
-		fpEnable.type = "button";
-		fpEnable.textContent = "Enable";
-		fpEnable.addEventListener("click", () =>
-			void doToggleFullPage(cur, "wrap"),
-		);
-		const fpDisable = ce("button", "rn-insp-fullpage-btn rn-insp-fullpage-btn-ghost");
-		fpDisable.type = "button";
-		fpDisable.textContent = "Disable";
-		fpDisable.addEventListener("click", () =>
-			void doToggleFullPage(cur, "unwrap"),
-		);
-		fpRow.append(fpEnable, fpDisable);
-		inspFullPage.append(fpHint, fpRow);
+		// Long-page row paused — kept the inspFullPage container empty so
+		// the layout doesn't reflow when re-enabled. The clickable
+		// Enable/Disable + doToggleFullPage wiring stays in the codebase
+		// for the eventual re-enable.
 
 		renderVersionStrip();
 	};
@@ -5431,7 +7975,11 @@ function routeMatchesPattern(
 function ensureRnPolling(): void {
 	if (rnPollTimer) return;
 	rnPollTimer = setInterval(async () => {
-		if (state.get().source.kind !== "iossim") {
+		const kind = state.get().source.kind;
+		// "url" mode (web projects) needs polling too — the Chrome extension
+		// pushes snaps via HTTP, bypassing the view's RPC, so the Library has
+		// no other way to learn about them. "iossim" is the original case.
+		if (kind !== "iossim" && kind !== "url") {
 			if (rnPollTimer) {
 				clearInterval(rnPollTimer);
 				rnPollTimer = null;
@@ -5474,10 +8022,105 @@ function ensureRnPolling(): void {
 	}, 1000);
 }
 
+// Live current-route indicator — polls the connected bridge every 2s
+// when a project is selected, updates `state.rn.currentRoute` so the
+// topbar pill shows "Connected · /reservation/abc123". Skipped when no
+// project is selected or bridge isn't online for it; lighter cadence
+// than the status poll because requestState round-trips to the device.
+let rnRoutePollTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * Auto-snap state machine:
+ *   - `lastSnappedRoute`: the last route we already snapped. Stays the
+ *     same when the user lingers on a screen so we don't fire a snap
+ *     every 2s.
+ *   - `pendingSnapRoute` + `pendingSnapAt`: tracks a route the user
+ *     just navigated to but we haven't snapped yet. We wait 1s of
+ *     stability (no further nav) before firing — gives the screen time
+ *     to render data, dismiss splash, etc.
+ */
+let lastSnappedRoute: string | null = null;
+let pendingSnapRoute: string | null = null;
+let pendingSnapAt = 0;
+const AUTO_SNAP_SETTLE_MS = 1000;
+
+function ensureRouteIndicatorPolling(): void {
+	if (rnRoutePollTimer) return;
+	rnRoutePollTimer = setInterval(async () => {
+		const cur = state.get();
+		if (cur.source.kind !== "iossim") {
+			if (rnRoutePollTimer) {
+				clearInterval(rnRoutePollTimer);
+				rnRoutePollTimer = null;
+			}
+			return;
+		}
+		const slug = cur.rn.selectedProjectSlug;
+		if (!slug || !cur.rn.projects.includes(slug)) {
+			if (cur.rn.currentRoute !== null) {
+				state.set((c) => ({ ...c, rn: { ...c.rn, currentRoute: null } }));
+			}
+			// Clear pending snap state when project context goes away.
+			pendingSnapRoute = null;
+			lastSnappedRoute = null;
+			return;
+		}
+		try {
+			const r = await req.getBridgeRoute({ projectSlug: slug });
+			const next = r.ok ? r.route ?? null : null;
+			if (next !== cur.rn.currentRoute) {
+				state.set((c) => ({ ...c, rn: { ...c.rn, currentRoute: next } }));
+			}
+			// Auto-snap logic — fires only when the toggle is ON, the
+			// bridge is reporting a route, and the route is new (not
+			// what we last snapped or what's currently pending).
+			if (isAutoSnapOn() && next && !cur.rn.busy && !cur.rn.pushing) {
+				if (next !== lastSnappedRoute && next !== pendingSnapRoute) {
+					// New route detected — start the settle clock.
+					pendingSnapRoute = next;
+					pendingSnapAt = Date.now();
+				} else if (
+					next === pendingSnapRoute &&
+					Date.now() - pendingSnapAt >= AUTO_SNAP_SETTLE_MS
+				) {
+					// Same route for at least the settle window — fire.
+					const routeToSnap = pendingSnapRoute;
+					pendingSnapRoute = null;
+					lastSnappedRoute = routeToSnap;
+					void doSnap("auto").catch((err) => {
+						log(
+							`Auto-snap failed: ${(err as Error).message}`,
+							"error",
+						);
+						// Reset so the user can retry by navigating away
+						// and back, instead of being stuck on a route
+						// we silently skip.
+						lastSnappedRoute = null;
+					});
+				}
+				// If the route changed AGAIN before settle, the first
+				// branch above resets pendingSnapAt — natural debounce.
+			}
+		} catch {
+			// Bridge dropped mid-poll — clear the indicator. The next
+			// status poll will pick up the disconnect and grey out
+			// the snap button.
+			if (cur.rn.currentRoute !== null) {
+				state.set((c) => ({ ...c, rn: { ...c.rn, currentRoute: null } }));
+			}
+			pendingSnapRoute = null;
+		}
+	}, 2000);
+}
+
 state.subscribe((s) => {
 	if (s.source.kind === "iossim") {
 		ensureRnPolling();
+		ensureRouteIndicatorPolling();
 		if (s.rn.registry.length === 0) void refreshProjectRegistry();
+	} else if (s.source.kind === "url") {
+		// Web projects also need the snap-status poll so extension-pushed
+		// snaps appear in the Library without a manual refresh.
+		ensureRnPolling();
 	}
 });
 

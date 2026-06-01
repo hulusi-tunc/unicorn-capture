@@ -22,6 +22,7 @@ import { dirname, join, relative } from "node:path";
 import {
 	addBridgeDep,
 	createProjectOnPlatform,
+	getAugmentedSpawnEnv,
 	injectLayoutSnippet,
 	patchMetroConfig,
 	registerWithCapture,
@@ -205,7 +206,7 @@ function spawnPm(args: {
 			[args.subcommand, ...args.extraArgs],
 			{
 				cwd: args.cwd,
-				env: process.env,
+				env: getAugmentedSpawnEnv(),
 			},
 		);
 
@@ -295,7 +296,7 @@ const runPodInstallStep: Step = {
 	async run(ctx) {
 		const iosDir = join(ctx.plan.fingerprint.picked!.rnAppDir, "ios");
 		await new Promise<void>((resolve) => {
-			const child = spawn("pod", ["install"], { cwd: iosDir });
+			const child = spawn("pod", ["install"], { cwd: iosDir, env: getAugmentedSpawnEnv() });
 			let stderr = "";
 			child.stdout.on("data", (b: Buffer) => {
 				const lines = b.toString().split("\n").filter(Boolean);
@@ -394,12 +395,24 @@ const runSnapFlowsScanStep: Step = {
 			: existsSync(rootBin)
 				? rootBin
 				: "npx";
-		const args = cmd === "npx"
+		// If snap-flows.ts already exists (e.g. user ran Improve and refined
+		// grouping via Claude Code, then re-runs the wizard), use --merge so
+		// new routes get folded in without trashing the curated structure.
+		const existingFlowsFile = join(rnAppDir, "snap-flows.ts");
+		const hasExisting = existsSync(existingFlowsFile);
+		const baseArgs = cmd === "npx"
 			? ["-y", getSnapBridgeRef(), "snap-flows-scan"]
 			: [];
+		const args = hasExisting ? [...baseArgs, "--merge"] : baseArgs;
+		if (hasExisting) {
+			ctx.emit(
+				"progress",
+				"Existing snap-flows.ts found — using --merge to preserve curated grouping",
+			);
+		}
 
 		await new Promise<void>((resolve, reject) => {
-			const child = spawn(cmd, args, { cwd: rnAppDir, env: process.env });
+			const child = spawn(cmd, args, { cwd: rnAppDir, env: getAugmentedSpawnEnv() });
 			let stdout = "";
 			let stderr = "";
 			child.stdout.on("data", (b: Buffer) => {
@@ -489,8 +502,8 @@ export function assembleCoreSteps(): Step[] {
 		runPackageInstallStep,
 		runViewShotInstallStep,
 		runPodInstallStep,
-		patchLayoutStep,
 		runSnapFlowsScanStep,
+		patchLayoutStep,
 		persistStep,
 	];
 }
