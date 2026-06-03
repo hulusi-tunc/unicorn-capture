@@ -105,6 +105,59 @@ quickly. The Capture desktop app picks up the change via Metro
 fast-refresh — no restart needed.
 `;
 
+// Used when the project has no snap-flows.ts yet (e.g. a react-navigation app,
+// where the expo-router scan is skipped). Instead of erroring, Improve hands
+// the user a prompt to CREATE the file from scratch.
+const BOOTSTRAP_HEADER = `# Create snap-flows.ts
+
+This project has no \`snap-flows.ts\` yet, so there's nothing to refine — let's
+create one. It declares the app's screens grouped into user-journey "flows" so
+Capture can pre-build the gallery structure and auto-place snaps by route.
+
+## What to produce
+
+A \`snap-flows.ts\` exporting a \`SnapFlowsDeclaration\`:
+
+\`\`\`ts
+import type { SnapFlowsDeclaration } from "@unicorn-studio/snap-bridge";
+
+export const snapFlows: SnapFlowsDeclaration = {
+  version: 1,
+  flows: [
+    {
+      id: "auth",
+      name: "Auth",
+      screens: [
+        { route: "/sign-in", name: "Sign in" },
+        { route: "/sign-up", name: "Sign up" },
+      ],
+    },
+  ],
+};
+\`\`\`
+
+## Rules
+
+1. \`route\` must match what the app reports to the bridge. For Expo Router that's
+   the URL path (\`/booking/select\`); for react-navigation it's the focused
+   route path \`useSnapAutoSync\` pushes (e.g. \`/Tabs/News/Article\`).
+2. Group by user journey (Auth, Onboarding, primary loops, Profile/settings
+   last), not by file structure. Keep nesting depth ≤ 2.
+3. \`name\` should be product wording ("Booking summary"), not a route slug.
+4. Only include routes you can see in the context below or that the app actually
+   has — don't invent screens.
+
+`;
+
+const BOOTSTRAP_FOOTER = `
+## Output
+
+Use your Write tool to create the file at the path shown above. Don't print it
+in the chat. After saving, give me a 2-3 line summary of the flows you created.
+If you weren't sure of some routes, capture a few screens in Capture first
+(each shows its real route), then re-run "Improve" to refine.
+`;
+
 /**
  * Walk app/ and produce screen peeks. Mirrors snap-flows-scan's walk so
  * route → file mapping stays consistent.
@@ -377,10 +430,37 @@ export function buildImprovePrompt(slug: string): ImproveResult {
 	let flowsContents: string;
 	try {
 		flowsContents = readFileSync(flowsFilePath, "utf8");
-	} catch (err) {
-		throw new Error(
-			`Couldn't read ${flowsFilePath}: ${(err as Error).message}. Run snap-flows-scan first.`,
-		);
+	} catch {
+		// No snap-flows.ts yet — e.g. a react-navigation app (the expo-router
+		// scan is skipped), or the scan simply never ran. Don't crash the
+		// Improve button: return a "bootstrap" prompt to CREATE the file from
+		// whatever screens we can see, instead of throwing.
+		const meta = readProjectMeta(rnAppDir);
+		const peeks = gatherScreenPeeks(rnAppDir);
+		const projectSection = `## Project context\n\n${renderProjectMeta(meta)}\n`;
+		const screensSection =
+			peeks.length > 0
+				? `## Screens (with code peeks)\n\n${peeks.map(renderScreenPeek).join("\n\n")}\n`
+				: "";
+		const createSection = `## Create the file at \`${flowsFilePath}\`\n\n${
+			peeks.length === 0
+				? "No screens were detected from an `app/` directory — this looks like a react-navigation app. Use the route names your navigators expose (the focused-route path `useSnapAutoSync` pushes, e.g. `/Tabs/News/Article`), or capture a few screens in Capture first (each shows its real route) and re-run Improve to refine."
+				: "Group the screens above into user-journey flows."
+		}`;
+		const clipboardPayload = [
+			BOOTSTRAP_HEADER,
+			projectSection,
+			screensSection,
+			createSection,
+			BOOTSTRAP_FOOTER,
+		]
+			.filter(Boolean)
+			.join("\n");
+		return {
+			clipboardPayload,
+			flowsFilePath,
+			summary: `no snap-flows.ts yet — bootstrap prompt${peeks.length ? ` (${peeks.length} screens)` : ""}`,
+		};
 	}
 
 	const meta = readProjectMeta(rnAppDir);
