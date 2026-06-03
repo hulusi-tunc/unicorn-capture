@@ -1,0 +1,21 @@
+#!/bin/sh
+# PATH shim — forces a non-sparse (ustar) archive when Electrobun's build calls
+# `tar -cf` to create the self-extractor payload.
+#
+# Why: the bundled binaries (bun, launcher, dylibs) are sparse files on APFS, so
+# macOS bsdtar auto-encodes them as GNU.sparse.1.0 PAX entries. Electrobun's
+# self-extractor ("v1.3") has a hand-rolled Zig tar reader with NO GNU-sparse
+# support, so it writes those binaries to `Contents/MacOS/GNUSparseFile.0/<bin>`
+# instead of `Contents/MacOS/<bin>` — leaving CFBundleExecutable (`launcher`)
+# missing, so macOS reports "the application … is damaged / executable is missing"
+# and the stable app never launches. `--format ustar` emits no sparse/PAX entries
+# (safe here: longest path ~75 chars < 100, largest file ~63MB < 8GB).
+#
+# electrobun runs the COMPILED bin/electrobun (not src/cli), which spawns bare
+# `tar` via execSync → /bin/sh → PATH, so prepending this dir to PATH (see the
+# build* scripts in package.json) is enough to intercept it. Upstream fix:
+# blackboardsh/electrobun should pass --format ustar (or implement GNU-sparse).
+case " $* " in
+	*" -cf "*) exec /usr/bin/tar --format ustar "$@" ;;
+	*)         exec /usr/bin/tar "$@" ;;
+esac
