@@ -142,6 +142,7 @@ export interface RepoFingerprint {
 	} | null;
 	pickedNotFoundReason?: string;
 	rnLayout: "expo-router" | "rn-cli" | "expo-classic" | "unknown";
+	navLibrary: "expo-router" | "react-navigation" | "unknown";
 	snapBridge:
 		| { state: "missing"; suggested: string }
 		| { state: "floating"; current: string; suggested: string }
@@ -184,6 +185,14 @@ export interface InstallProgressMessage {
 	message: string;
 	progress?: number;
 	outputLine?: string;
+}
+
+/** Pushed bun→view once an update has been downloaded and is ready to apply. */
+export interface UpdateReadyMessage {
+	/** Version string from the freshly fetched update.json. */
+	version: string;
+	/** Content hash of the new build (what the updater compares on). */
+	hash: string;
 }
 
 /**
@@ -248,6 +257,20 @@ export interface RnInitOutcome {
 export type ScenarioRunnerRPC = {
 	bun: {
 		requests: {
+			/** View asks bun to apply the downloaded update and relaunch. */
+			applyUpdate: {
+				params: Record<string, never>;
+				response: { ok: boolean; error?: string };
+			};
+			/**
+			 * View pulls any update that finished downloading before its RPC
+			 * handler was live (the push is fire-once and unbuffered). Called
+			 * once at view bootstrap so a won launch-race still shows the banner.
+			 */
+			getPendingUpdate: {
+				params: Record<string, never>;
+				response: { update: UpdateReadyMessage | null };
+			};
 			resolveSource: {
 				params: SourceInput;
 				response: {
@@ -836,6 +859,8 @@ export type ScenarioRunnerRPC = {
 			 * The view's stepper UI reads these in real time.
 			 */
 			onInitProgress: InstallProgressMessage;
+			/** Pushed once a downloaded update is ready; view shows the restart banner. */
+			onUpdateReady: UpdateReadyMessage;
 		};
 	};
 	webview: {

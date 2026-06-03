@@ -241,6 +241,21 @@ function subscribeInstallProgress(
 	};
 }
 
+// `onUpdateReady` is pushed bun→view once an auto-update has finished
+// downloading and is ready to apply. Fanned out to whoever subscribed (the
+// restart banner), mirroring `progressListeners`.
+const updateReadyListeners = new Set<
+	(msg: import("../lib/rpc").UpdateReadyMessage) => void
+>();
+function subscribeUpdateReady(
+	handler: (msg: import("../lib/rpc").UpdateReadyMessage) => void,
+): () => void {
+	updateReadyListeners.add(handler);
+	return () => {
+		updateReadyListeners.delete(handler);
+	};
+}
+
 const rpc = Electroview.defineRPC<ScenarioRunnerRPC>({
 	maxRequestTime: 600000,
 	handlers: {
@@ -252,6 +267,15 @@ const rpc = Electroview.defineRPC<ScenarioRunnerRPC>({
 						l(msg);
 					} catch (err) {
 						console.error("progress listener crashed:", err);
+					}
+				}
+			},
+			onUpdateReady: (msg: import("../lib/rpc").UpdateReadyMessage) => {
+				for (const l of updateReadyListeners) {
+					try {
+						l(msg);
+					} catch (err) {
+						console.error("updateReady listener crashed:", err);
 					}
 				}
 			},
@@ -2691,6 +2715,77 @@ function dismissChangesBanner(): void {
 	activeChangesBanner = null;
 	setTimeout(() => node.remove(), 240);
 }
+
+// ─── Auto-update "Restart to update" banner ───
+// Pushed from bun once an update has downloaded. PERSISTENT — unlike the
+// changes banner it has no auto-dismiss timer; prompt-to-restart must wait
+// for the user. De-dupes so a re-check can't stack banners.
+let updateBanner: HTMLDivElement | null = null;
+
+function showUpdateBanner(m: import("../lib/rpc").UpdateReadyMessage): void {
+	if (updateBanner) return;
+	const banner = ce("div", "rn-update-banner");
+	banner.setAttribute("role", "status");
+	banner.setAttribute("aria-live", "polite");
+
+	const icon = ce("span", "rn-changes-icon");
+	icon.textContent = "⬆️";
+
+	const body = ce("div", "rn-changes-body");
+	const heading = ce("div", "rn-changes-heading");
+	heading.textContent = "Update ready";
+	const detail = ce("div", "rn-changes-detail");
+	const label = m.version || (m.hash ? m.hash.slice(0, 8) : "new build");
+	detail.textContent = `Version ${label} downloaded. Restart to apply.`;
+	body.append(heading, detail);
+
+	const restart = ce("button", "btn btn-sm rn-update-restart");
+	restart.type = "button";
+	restart.textContent = "Restart to update";
+	restart.addEventListener("click", async () => {
+		restart.disabled = true;
+		restart.textContent = "Restarting…";
+		// applyUpdate relaunches + quits — on success the app is gone and the
+		// response never arrives, so only the error/no-op branch matters.
+		try {
+			const r = await req.applyUpdate({});
+			if (r && !r.ok) {
+				showToast(`Update failed: ${r.error ?? "unknown error"}`, "error");
+				restart.disabled = false;
+				restart.textContent = "Restart to update";
+			}
+		} catch (err) {
+			showToast(`Update failed: ${(err as Error).message}`, "error");
+			restart.disabled = false;
+			restart.textContent = "Restart to update";
+		}
+	});
+
+	const close = ce("button", "rn-changes-close");
+	close.type = "button";
+	close.setAttribute("aria-label", "Dismiss");
+	close.textContent = "×";
+	close.addEventListener("click", () => {
+		updateBanner?.remove();
+		updateBanner = null;
+	});
+
+	banner.append(icon, body, restart, close);
+	document.body.appendChild(banner);
+	updateBanner = banner;
+}
+
+// Wire the bun push to the banner once, at module load.
+subscribeUpdateReady(showUpdateBanner);
+// The push is fire-once and unbuffered, so if the update finished downloading
+// before this handler was live it'd be lost — pull any pending update now that
+// we're listening. showUpdateBanner de-dupes, so a racing push is harmless.
+req
+	.getPendingUpdate({})
+	.then((r: { update: import("../lib/rpc").UpdateReadyMessage | null }) => {
+		if (r?.update) showUpdateBanner(r.update);
+	})
+	.catch(() => {});
 
 function escapeHtmlSimple(s: string): string {
 	return s

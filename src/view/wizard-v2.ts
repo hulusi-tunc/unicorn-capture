@@ -307,6 +307,7 @@ export function openWizardV2(deps: WizardDeps): void {
 				<dt>Workspace</dt>        <dd>${escapeHtml(fp.workspaceRoot)}${fp.isMonorepo ? " (monorepo)" : ""}</dd>
 				<dt>RN app</dt>           <dd>${escapeHtml(pickedLabel)}</dd>
 				<dt>Layout flavor</dt>    <dd>${fp.rnLayout}</dd>
+				<dt>Navigation</dt>       <dd>${fp.navLibrary}</dd>
 				<dt>Package manager</dt>  <dd>${fp.packageManager}</dd>
 				<dt>snap-bridge</dt>      <dd>${escapeHtml(bridgeLabel)}</dd>
 				<dt>view-shot</dt>        <dd>${fp.viewShot.installed ? `installed${fp.viewShot.podsInstalled ? " (+ pods)" : " (pods not run)"}` : "missing"}</dd>

@@ -7,9 +7,14 @@ import {
 	ApplicationMenu,
 	BrowserView,
 	BrowserWindow,
+	Updater,
 	Utils,
 } from "electrobun/bun";
-import type { RnSnapInfo, ScenarioRunnerRPC } from "../lib/rpc";
+import type {
+	RnSnapInfo,
+	ScenarioRunnerRPC,
+	UpdateReadyMessage,
+} from "../lib/rpc";
 import { validateDeviceConfig, validateScenario } from "../lib/schemas";
 import { probeExpoDevServer, probeSimulatorBooted, runDoctor } from "./doctor";
 import {
@@ -815,10 +820,33 @@ function freeCurrentSource(): void {
 	}
 }
 
+// Holds an update that finished downloading, so the view can pull it via
+// `getPendingUpdate` if it wasn't yet listening when the one-shot push fired.
+let pendingUpdate: UpdateReadyMessage | null = null;
+
 const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 	maxRequestTime: 600000,
 	handlers: {
 		requests: {
+			applyUpdate: async () => {
+				try {
+					// Manual API: extracts the new bundle, swaps the .app,
+					// relaunches, then quit()s — on REAL success this never
+					// returns (the process exits). So reaching the line after it
+					// means it did NOT apply (e.g. a newer build was published
+					// mid-session, so the downloaded tar no longer matches the
+					// latest hash). Report that as failure so the view re-enables
+					// the button instead of hanging on "Restarting…".
+					await Updater.applyUpdate();
+					return {
+						ok: false,
+						error: "Update is no longer ready — relaunch to retry.",
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			getPendingUpdate: async () => ({ update: pendingUpdate }),
 			resolveSource: async (input) => {
 				freeCurrentSource();
 				const r = await resolveSource(input);
@@ -1853,5 +1881,52 @@ try {
 } catch (e: any) {
 	dbg(`BrowserWindow FAILED: ${e?.stack || e}`);
 }
+
+// ── Auto-update (prompt-to-restart) ──────────────────────────────────────
+// On launch only: check → download in the background → push a "ready" event
+// so the view can show a non-blocking "Restart to update" banner. The actual
+// apply+relaunch happens when the user clicks it (applyUpdate rpc handler).
+// The Updater is a manual API — nothing self-triggers — so this is the wiring.
+// Dev-gated: `electrobun dev` ships version.json {channel:"dev", baseUrl:""},
+// and an unconfigured build has an empty baseUrl; both skip cleanly.
+async function maybeAutoUpdate(): Promise<void> {
+	try {
+		const local = await Updater.getLocalInfo();
+		if (local.channel === "dev" || !local.baseUrl) {
+			dbg(
+				`updater: skip (channel=${local.channel || "<empty>"} baseUrl=${local.baseUrl || "<empty>"})`,
+			);
+			return;
+		}
+		const info = await Updater.checkForUpdate();
+		if (info.error) {
+			dbg(`updater: check error: ${info.error}`);
+			return;
+		}
+		if (!info.updateAvailable) {
+			dbg("updater: up to date");
+			return;
+		}
+		dbg(`updater: downloading ${info.hash?.slice(0, 8)}…`);
+		await Updater.downloadUpdate();
+		if (Updater.updateInfo()?.updateReady) {
+			// Retain it so a view that wasn't listening yet can pull it via
+			// getPendingUpdate; the push below is best-effort on top of that.
+			pendingUpdate = { version: info.version, hash: info.hash };
+			(
+				rpc.send as unknown as {
+					onUpdateReady: (m: UpdateReadyMessage) => void;
+				}
+			).onUpdateReady(pendingUpdate);
+			dbg("updater: download complete — restart banner pushed");
+		} else {
+			dbg("updater: download did not complete (no updateReady)");
+		}
+	} catch (err) {
+		// Never let an update check crash or block launch.
+		dbg(`updater error: ${(err as Error).message}`);
+	}
+}
+void maybeAutoUpdate();
 
 process.on("exit", () => freeCurrentSource());

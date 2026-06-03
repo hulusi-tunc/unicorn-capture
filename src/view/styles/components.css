@@ -4301,6 +4301,42 @@ kbd {
 	color: var(--fg-0);
 }
 
+/* Auto-update "Restart to update" prompt. Bottom-centered + persistent (no
+   auto-dismiss) so it never collides with the top-anchored changes banner.
+   Reuses the .rn-changes-* child classes for icon/body/heading/detail/close. */
+.rn-update-banner {
+	position: fixed;
+	bottom: 24px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 201;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 380px;
+	max-width: 640px;
+	padding: 12px 16px;
+	border-radius: 12px;
+	border: 1px solid var(--accent);
+	background: var(--bg-0);
+	box-shadow: 0 18px 36px -12px oklch(0 0 0 / 0.35);
+	font-family: var(--font);
+	animation: rn-update-in 240ms var(--ease) both;
+}
+@keyframes rn-update-in {
+	from {
+		opacity: 0;
+		transform: translate(-50%, 8px);
+	}
+	to {
+		opacity: 1;
+		transform: translate(-50%, 0);
+	}
+}
+.rn-update-restart {
+	flex-shrink: 0;
+}
+
 /* Toast stack — bottom-right corner, surfaces log events while the user
    works (refresh results, push outcomes, errors, etc.). */
 .rn-toast-stack {
