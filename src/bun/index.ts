@@ -26,6 +26,7 @@ import {
 	loadCaptureProjects,
 	registerWithCapture,
 	removeCaptureProject,
+	resolveProjectByToken,
 } from "./init";
 import {
 	type InstallOutcome,
@@ -1660,6 +1661,115 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						restored: platform.restored,
 						reused: platform.reused,
 						seededFlows,
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			createDeviceProject: async (input: {
+				name: string;
+				slug?: string;
+				platformUrl: string;
+				setupToken?: string;
+				token?: string;
+			}) => {
+				// No-repo, no-bridge project for simulator capture (Flutter,
+				// native iOS, iPad, RN-without-bridge). Mirrors createWebProject
+				// but drops baseUrl + seedFlows and registers with NO repoPath/
+				// rnAppDir so the repo-only paths (doctor, flows-scan, expo) are
+				// never invoked for it.
+				const { name, slug, platformUrl } = input;
+				const slugify = (s: string): string =>
+					s
+						.toLowerCase()
+						.replace(/[^a-z0-9]+/g, "-")
+						.replace(/^-|-$/g, "")
+						.slice(0, 48);
+				const trimmedName = name.trim();
+				const trimmedPlatformUrl = platformUrl.trim().replace(/\/$/, "");
+				const suppliedToken = input.token?.trim();
+				const setupToken = input.setupToken?.trim();
+				if (!trimmedName) return { ok: false, error: "Name is required." };
+				if (!trimmedPlatformUrl)
+					return { ok: false, error: "Gallery URL is required." };
+				try {
+					new URL(trimmedPlatformUrl);
+				} catch {
+					return { ok: false, error: "Gallery URL is not a valid URL." };
+				}
+				if (!suppliedToken && !setupToken) {
+					return {
+						ok: false,
+						error:
+							"A setup token or an existing project token (pgt_…) is required.",
+					};
+				}
+				const computedSlug =
+					slug?.trim() ||
+					slugify(trimmedName) ||
+					`device-${Date.now().toString(36).slice(-6)}`;
+				if (!/^[a-z0-9][a-z0-9-]*$/.test(computedSlug)) {
+					return {
+						ok: false,
+						error: "Slug must be lowercase kebab-case (a–z, 0–9, hyphen).",
+					};
+				}
+				const uploadUrl = `${trimmedPlatformUrl}/api/captures/upload`;
+				try {
+					// Two ways in: reuse an existing pgt_ project token directly,
+					// or create a fresh project on the gallery with a setup token.
+					if (suppliedToken) {
+						if (!suppliedToken.startsWith("pgt_")) {
+							return {
+								ok: false,
+								error: 'A project token should start with "pgt_".',
+							};
+						}
+						// Resolve the REAL project this token belongs to instead
+						// of trusting the typed slug: the gallery attributes
+						// uploads by token, so a mismatched local slug would
+						// mislabel the project and break archive sync. Also
+						// validates the token up front (throws on 401/expired).
+						const resolved = await resolveProjectByToken({
+							url: trimmedPlatformUrl,
+							token: suppliedToken,
+						});
+						registerWithCapture({
+							slug: resolved.slug,
+							name: trimmedName,
+							platform: resolved.platform,
+							projectToken: suppliedToken,
+							uploadUrl,
+							registeredAt: new Date().toISOString(),
+						});
+						return {
+							ok: true,
+							slug: resolved.slug,
+							projectToken: suppliedToken,
+							reused: true,
+						};
+					}
+					const platform = await createProjectOnPlatform({
+						url: trimmedPlatformUrl,
+						setupToken: setupToken!,
+						slug: computedSlug,
+						name: trimmedName,
+						platform: "ios",
+					});
+					registerWithCapture({
+						slug: platform.slug,
+						name: platform.name,
+						platform: "ios",
+						projectToken: platform.projectToken,
+						uploadUrl,
+						registeredAt: new Date().toISOString(),
+					});
+					return {
+						ok: true,
+						slug: platform.slug,
+						projectToken: platform.projectToken,
+						restored: platform.restored,
+						reused: platform.reused,
 					};
 				} catch (err) {
 					return { ok: false, error: (err as Error).message };

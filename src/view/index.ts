@@ -3616,12 +3616,20 @@ function renderDashboardCards(refs: DashRefs): void {
 		card.type = "button";
 		const type = projectTypeOf(p.slug);
 		const connected = r.projects.includes(p.slug);
+		// A "device project" is a non-web project with no local repo — created
+		// via "Add simulator app". It captures bridge-less via simctl, so the
+		// repo-only actions (Doctor / Refresh / Improve) don't apply.
+		const isDevice = type !== "web" && !p.rnAppDir;
 
 		const top = ce("div", "dash-card-top");
 		const badge = ce("span", `dash-card-type dash-card-type-${type}`);
-		badge.textContent = type === "web" ? "WEB" : "MOBILE";
+		badge.textContent = type === "web" ? "WEB" : isDevice ? "DEVICE" : "MOBILE";
 		const status = ce("span", `dash-card-status ${connected ? "is-connected" : ""}`);
-		status.title = connected ? "snap-bridge connected" : "not connected";
+		status.title = isDevice
+			? "Simulator capture — no snap-bridge needed"
+			: connected
+				? "snap-bridge connected"
+				: "not connected";
 		top.append(badge, status);
 
 		const nameEl = ce("div", "dash-card-name");
@@ -3692,7 +3700,13 @@ function renderDashboardCards(refs: DashRefs): void {
 			void doRemoveProject(p.slug, p.name);
 		});
 
-		actions.append(doctorBtn, refreshBtn, improveBtn, settingsBtn, removeBtn);
+		// Device projects have no repo, so Doctor / Refresh / Improve (all
+		// repo-bound) are omitted — only Settings and Remove apply.
+		if (isDevice) {
+			actions.append(settingsBtn, removeBtn);
+		} else {
+			actions.append(doctorBtn, refreshBtn, improveBtn, settingsBtn, removeBtn);
+		}
 
 		card.append(top, nameEl, slugEl, actions);
 		card.addEventListener("click", () => enterProject(p.slug));
@@ -3783,7 +3797,17 @@ function openAddTypeChooser(): void {
 		},
 	);
 
-	tiles.append(mobileTile, webTile);
+	const simulatorTile = mkTile(
+		"camera",
+		"Simulator",
+		"Snap any app in the iOS Simulator — Flutter, native, iPad, or RN. No code setup.",
+		() => {
+			close();
+			openAddSimulatorForm();
+		},
+	);
+
+	tiles.append(mobileTile, webTile, simulatorTile);
 
 	const actions = document.createElement("div");
 	actions.className = "rn-confirm-actions";
@@ -3808,6 +3832,148 @@ function openAddTypeChooser(): void {
 		if (e.target === backdrop) close();
 	});
 	document.addEventListener("keydown", onKey);
+}
+
+// Simulator project onboarding — minimal, no repo. Registers a gallery
+// project (platform ios) so bridge-less device snaps have somewhere to land.
+// Works for any simulator app: Flutter, native iOS, iPad, or RN without the
+// bridge. The exact device is chosen later via the topbar Device picker.
+function openAddSimulatorForm(): void {
+	const form = {
+		name: "",
+		platformUrl: readLocal("prisma:platform-url") ?? "",
+		token: readLocal("prisma:setup-token") ?? "",
+		error: undefined as string | undefined,
+		busy: false,
+	};
+
+	const backdrop = ce("div", "rn-confirm-backdrop");
+	const dlg = ce("div", "rn-confirm-dialog");
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = (): void => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent): void => {
+		if (e.key === "Escape") close();
+	};
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+
+	const render = (): void => {
+		dlg.replaceChildren();
+		const title = ce("h3", "rn-confirm-title");
+		title.textContent = "Add a simulator app";
+		const body = ce("p", "rn-confirm-body");
+		body.textContent =
+			"Capture screens from any app running in the iOS Simulator — Flutter, native, React Native, or iPad. No code changes, no snap-bridge. You'll pick the exact device when you snap.";
+
+		const fields = ce("div", "rn-web-wizard-fields");
+		const mkField = (label: string, input: HTMLInputElement): void => {
+			const lab = ce("label", "rn-push-field-label");
+			lab.textContent = label;
+			fields.append(lab, input);
+		};
+		const nameInput = ce("input", "input");
+		nameInput.type = "text";
+		nameInput.placeholder = "e.g. Acme iPad app";
+		nameInput.value = form.name;
+		nameInput.addEventListener("input", () => {
+			form.name = nameInput.value;
+		});
+		mkField("Name", nameInput);
+
+		const urlInput = ce("input", "input");
+		urlInput.type = "url";
+		urlInput.placeholder = "https://unicorn-studio-gallery.vercel.app";
+		urlInput.value = form.platformUrl;
+		urlInput.addEventListener("input", () => {
+			form.platformUrl = urlInput.value;
+		});
+		mkField("Gallery URL", urlInput);
+
+		const tokenInput = ce("input", "input");
+		tokenInput.type = "password";
+		tokenInput.placeholder = "setup_… or an existing pgt_… token";
+		tokenInput.value = form.token;
+		tokenInput.addEventListener("input", () => {
+			form.token = tokenInput.value;
+		});
+		mkField("Setup token (or pgt_ project token)", tokenInput);
+
+		const errorBox = ce("div", "rn-wizard-error");
+		errorBox.style.display = form.error ? "" : "none";
+		errorBox.textContent = form.error ?? "";
+
+		const actions = ce("div", "rn-confirm-actions");
+		const cancelBtn = ce("button", "btn btn-ghost");
+		cancelBtn.type = "button";
+		cancelBtn.textContent = "Cancel";
+		cancelBtn.addEventListener("click", close);
+		const createBtn = ce("button", "btn btn-primary");
+		createBtn.type = "button";
+		createBtn.textContent = form.busy ? "Creating…" : "Create";
+		createBtn.disabled = form.busy;
+		createBtn.addEventListener("click", () => void runCreate());
+		actions.append(cancelBtn, createBtn);
+
+		dlg.append(title, body, fields, errorBox, actions);
+		queueMicrotask(() => nameInput.focus());
+	};
+
+	const runCreate = async (): Promise<void> => {
+		if (form.busy) return;
+		const name = form.name.trim();
+		const platformUrl = form.platformUrl.trim().replace(/\/$/, "");
+		const token = form.token.trim();
+		if (!name || !platformUrl || !token) {
+			form.error = "Name, gallery URL, and a token are all required.";
+			render();
+			return;
+		}
+		try {
+			new URL(platformUrl);
+		} catch {
+			form.error = "Gallery URL must be a valid URL (include https://).";
+			render();
+			return;
+		}
+		form.busy = true;
+		form.error = undefined;
+		render();
+		// One field, two token kinds: a pgt_ token reuses an existing gallery
+		// project; anything else is treated as a setup token that creates one.
+		const isProjectToken = token.startsWith("pgt_");
+		const r = await req.createDeviceProject({
+			name,
+			platformUrl,
+			...(isProjectToken ? { token } : { setupToken: token }),
+		});
+		if (!r.ok) {
+			form.busy = false;
+			form.error = r.error;
+			render();
+			return;
+		}
+		writeLocal("prisma:platform-url", platformUrl);
+		// Don't overwrite a saved setup token with a one-off project token.
+		if (!isProjectToken) writeLocal("prisma:setup-token", token);
+		log(
+			r.reused
+				? `↻ Linked simulator project "${r.slug}"`
+				: `+ Created simulator project "${r.slug}"`,
+			"success",
+		);
+		await refreshProjectRegistry();
+		close();
+		enterProject(r.slug);
+	};
+
+	render();
 }
 
 // Web project onboarding — phased wizard. Mirrors mobile's wizard-v2

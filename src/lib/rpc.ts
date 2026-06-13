@@ -809,6 +809,31 @@ export type ScenarioRunnerRPC = {
 					| { ok: false; error: string };
 			};
 			/**
+			 * Create a "device project": platform ios, NO repo, NO baseUrl, NO
+			 * snap-bridge. For capturing any app in the simulator (Flutter,
+			 * native iOS, iPad, or RN without the bridge) via simctl. Accepts
+			 * either a `setupToken` (creates the project on the gallery) or an
+			 * existing `pgt_` project `token` (reuses it).
+			 */
+			createDeviceProject: {
+				params: {
+					name: string;
+					slug?: string;
+					platformUrl: string;
+					setupToken?: string;
+					token?: string;
+				};
+				response:
+					| {
+							ok: true;
+							slug: string;
+							projectToken: string;
+							restored?: boolean;
+							reused?: boolean;
+					  }
+					| { ok: false; error: string };
+			};
+			/**
 			 * Record a snap captured from the web mode iframe. Mirrors the
 			 * mobile snap pipeline (auto-flow from path prefix, sequence
 			 * numbering, placement reporting) — minus the bridge state +
