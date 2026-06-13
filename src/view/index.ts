@@ -2947,6 +2947,19 @@ gtbSnapCaret.addEventListener("click", (ev) => {
 });
 gtbSnapGroup.append(gtbSnapBtn, gtbSnapCaret);
 
+// Device picker — pick & boot a simulator (iPhone or iPad) to capture.
+// Bridge-less: targets a booted simulator via simctl, so it works for ANY
+// app (Flutter, native iOS, iPad) and for RN apps without snap-bridge.
+const gtbDeviceBtn = document.createElement("button");
+gtbDeviceBtn.className = "btn btn-ghost mode-project";
+gtbDeviceBtn.title =
+	"Pick & boot a simulator (iPhone or iPad) to capture. Works without snap-bridge — for any app, including Flutter and native.";
+setBtnIcon(gtbDeviceBtn, "smartphone", "Device");
+gtbDeviceBtn.addEventListener("click", (ev) => {
+	ev.stopPropagation();
+	void openDeviceMenu(gtbDeviceBtn);
+});
+
 // Back button lives in column 1 of the topbar (next to the brand slot).
 // Inserted right after the brand so DOM order matches reading order.
 gtbBrand.insertAdjacentElement("afterend", gtbBackBtn);
@@ -2959,6 +2972,7 @@ gtbActions.append(
 	gtbPushBtn,
 	gtbAutoSnapBtn,
 	gtbTourBtn,
+	gtbDeviceBtn,
 	gtbSnapGroup,
 );
 
@@ -3033,6 +3047,113 @@ function openSnapMenu(
 	document.addEventListener("click", onDocClickCloseSnap, true);
 }
 
+// ── Device picker ─────────────────────────────────────────────────────────
+// The udid the bridge-less device snap targets. null = "the booted device"
+// (simctl's default). Set when the user picks a device from the menu.
+let selectedDeviceUdid: string | null = null;
+
+let deviceMenuOpen: HTMLDivElement | null = null;
+function closeDeviceMenu(): void {
+	if (!deviceMenuOpen) return;
+	deviceMenuOpen.remove();
+	deviceMenuOpen = null;
+	document.removeEventListener("click", onDocClickCloseDevice, true);
+}
+function onDocClickCloseDevice(ev: MouseEvent): void {
+	if (!deviceMenuOpen) return;
+	if (deviceMenuOpen.contains(ev.target as Node)) return;
+	closeDeviceMenu();
+}
+async function openDeviceMenu(anchor: HTMLElement): Promise<void> {
+	if (deviceMenuOpen) {
+		closeDeviceMenu();
+		return;
+	}
+	const rect = anchor.getBoundingClientRect();
+	const menu = ce("div", "gtb-snap-menu");
+	menu.style.top = `${rect.bottom + 6}px`;
+	menu.style.right = `${window.innerWidth - rect.right}px`;
+	const loading = ce("p", "gtb-snap-menu-hint");
+	loading.textContent = "Loading simulators…";
+	loading.style.padding = "10px 12px";
+	menu.appendChild(loading);
+	document.body.appendChild(menu);
+	deviceMenuOpen = menu;
+	document.addEventListener("click", onDocClickCloseDevice, true);
+
+	const res = await req.listDevices({});
+	if (deviceMenuOpen !== menu) return; // closed while the list loaded
+	menu.replaceChildren();
+	if (!res.ok) {
+		const err = ce("p", "gtb-snap-menu-hint");
+		err.textContent = res.error;
+		err.style.padding = "10px 12px";
+		menu.appendChild(err);
+		return;
+	}
+	if (res.devices.length === 0) {
+		const empty = ce("p", "gtb-snap-menu-hint");
+		empty.textContent =
+			"No simulators found. Add one in Xcode → Settings → Platforms.";
+		empty.style.padding = "10px 12px";
+		menu.appendChild(empty);
+		return;
+	}
+	const groups: Array<[("ipad" | "iphone" | "other"), string]> = [
+		["ipad", "iPad"],
+		["iphone", "iPhone"],
+		["other", "Other"],
+	];
+	for (const [kind, label] of groups) {
+		const inGroup = res.devices.filter((d) => d.kind === kind);
+		if (inGroup.length === 0) continue;
+		const header = ce("div");
+		header.textContent = label;
+		header.style.cssText =
+			"padding:8px 12px 2px;font-size:11px;font-weight:600;opacity:0.5;text-transform:uppercase;letter-spacing:0.04em;";
+		menu.appendChild(header);
+		for (const d of inGroup) {
+			const item = ce("button", "gtb-snap-menu-item");
+			item.type = "button";
+			const head = ce("div", "gtb-snap-menu-head");
+			const t = ce("span", "gtb-snap-menu-title");
+			t.textContent = d.name;
+			const k = ce("span", "gtb-snap-menu-kbd");
+			k.textContent = d.state === "Booted" ? "● booted" : d.runtime;
+			head.append(t, k);
+			const h = ce("p", "gtb-snap-menu-hint");
+			h.textContent =
+				selectedDeviceUdid === d.udid
+					? "Selected for capture"
+					: d.state === "Booted"
+						? "Booted — click to target for Snap"
+						: "Click to boot + target for Snap";
+			item.append(head, h);
+			item.addEventListener("click", () => {
+				closeDeviceMenu();
+				void bootAndSelectDevice(d.udid, d.name);
+			});
+			menu.appendChild(item);
+		}
+	}
+}
+
+async function bootAndSelectDevice(udid: string, name: string): Promise<void> {
+	selectedDeviceUdid = udid;
+	log(`Booting ${name}…`, "info");
+	const r = await req.bootDevice({ udid });
+	if (!r.ok) {
+		log(`Couldn't boot ${name}: ${r.error}`, "error");
+		return;
+	}
+	log(
+		r.alreadyBooted
+			? `${name} is ready — Snap will capture it.`
+			: `Booted ${name} — Snap will capture it.`,
+		"success",
+	);
+}
+
 function syncGlobalTopbar(): void {
 	const slug = state.get().rn.selectedProjectSlug;
 	if (slug == null) {
@@ -3050,8 +3171,11 @@ state.subscribe((s) => {
 	const projectSnaps = slug
 		? r.snaps.filter((n) => n.projectId === slug)
 		: r.snaps;
-	gtbSnapBtn.disabled = r.clientCount === 0 || r.busy;
-	gtbSnapCaret.disabled = r.clientCount === 0 || r.busy;
+	// Snap works with a connected bridge OR bridge-less via simctl, so it's
+	// available for any open mobile project — doSnap picks the path.
+	const snapAvailable = slug != null && projectTypeOf(slug) !== "web";
+	gtbSnapBtn.disabled = r.busy || !snapAvailable;
+	gtbSnapCaret.disabled = r.busy || !snapAvailable;
 	gtbSnapBtn.classList.toggle("is-busy", r.busy);
 	setBtnIcon(gtbSnapBtn, r.busy ? "loader" : "camera", r.busy ? "Capturing…" : "Snap");
 	// Tour button: only meaningful when bridge is connected for the
@@ -4669,12 +4793,40 @@ async function doSnap(
 	if (state.get().rn.busy) return; // double-click guard
 	state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: true } }));
 	try {
-		const r = await req.performSnap({
-			projectSlug: state.get().rn.selectedProjectSlug ?? undefined,
-			mode,
-			forceFlowId: target?.forceFlowId,
-			forceScreen: target?.forceScreen,
-		});
+		const st = state.get();
+		const slug = st.rn.selectedProjectSlug ?? undefined;
+		// Snap uses the connected bridge (rich route/state/full-page) when
+		// present, else falls back to a bridge-less simctl device capture so
+		// ANY booted simulator app (Flutter, native, iPad, or a disconnected
+		// RN app) still snaps.
+		const bridgeConnected = !!slug && st.rn.projects.includes(slug);
+		let r: Awaited<ReturnType<typeof req.performSnap>>;
+		if (bridgeConnected) {
+			r = await req.performSnap({
+				projectSlug: slug,
+				mode,
+				forceFlowId: target?.forceFlowId,
+				forceScreen: target?.forceScreen,
+			});
+		} else if (!slug) {
+			log("Open a project first, then Snap.", "error");
+			return;
+		} else {
+			const dr = await req.deviceSnap({
+				projectSlug: slug,
+				deviceUdid: selectedDeviceUdid ?? undefined,
+				forceFlowId: target?.forceFlowId,
+			});
+			r = dr.ok
+				? {
+						ok: true,
+						snap: dr.snap,
+						recordKind: "appended",
+						placement: dr.placement,
+						captureMethod: dr.captureMethod,
+					}
+				: { ok: false, error: dr.error };
+		}
 		if (!r.ok) {
 			log(r.error, "error");
 			return;

@@ -35,7 +35,7 @@ import {
 import { assembleCoreSteps } from "./installer-steps";
 import { fingerprintRepo } from "./repo-fingerprint";
 import { captureRect } from "./screencapture";
-import { forwardTap, mirrorSimulator } from "./simulator";
+import { bootDevice, forwardTap, listDevices, mirrorSimulator } from "./simulator";
 import {
 	buildImprovePrompt,
 	buildWebImprovePrompt,
@@ -1537,6 +1537,28 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				return { ok: true };
 			},
 			bootSimulator: async () => bootSimulator(),
+			listDevices: async () => listDevices(),
+			bootDevice: async ({ udid }) => bootDevice(udid),
+			deviceSnap: async ({ projectSlug, deviceUdid, displayName, forceFlowId }) => {
+				// Bridge-less snap: NO clientCount gate. Captures whatever is on
+				// the booted (or specified) simulator via simctl and files it
+				// under the selected project — works for Flutter / native / iPad
+				// and any RN app whose bridge isn't connected.
+				const orch = await ensureOrchestrator();
+				const r = await orch.recordDeviceSnap({
+					projectId: projectSlug,
+					deviceUdid,
+					displayName,
+					flowId: forceFlowId,
+				});
+				if (!r.ok) return { ok: false, error: r.error };
+				return {
+					ok: true,
+					snap: snapToInfo(r.record, orch.outDir),
+					placement: r.placement,
+					captureMethod: "simctl" as const,
+				};
+			},
 			initProject: async (input) => {
 				const result = await initProject(input);
 				if (!result.ok) {

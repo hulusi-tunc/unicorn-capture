@@ -666,6 +666,63 @@ export type ScenarioRunnerRPC = {
 				response: { ok: true; output: string } | { ok: false; error: string };
 			};
 			/**
+			 * List available iOS Simulator devices (iPhone + iPad) for the
+			 * device picker. Booted devices sort first. macOS-only.
+			 */
+			listDevices: {
+				params: Record<string, never>;
+				response:
+					| {
+							ok: true;
+							devices: Array<{
+								udid: string;
+								name: string;
+								state: string;
+								kind: "iphone" | "ipad" | "other";
+								runtime: string;
+							}>;
+					  }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Boot a specific simulator device by udid, then open Simulator.app.
+			 * Already-booted devices resolve ok. macOS-only.
+			 */
+			bootDevice: {
+				params: { udid: string };
+				response:
+					| { ok: true; alreadyBooted: boolean }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Bridge-less capture: screenshot a booted simulator via simctl and
+			 * append it as a frame — no snap-bridge required. Works for any app
+			 * on the simulator (Flutter, native iOS, iPad, or an RN app without
+			 * the bridge). `deviceUdid` targets a specific device; omit for the
+			 * single booted one. `forceFlowId` pins placement.
+			 */
+			deviceSnap: {
+				params: {
+					projectSlug: string;
+					deviceUdid?: string;
+					displayName?: string;
+					forceFlowId?: string;
+				};
+				response:
+					| {
+							ok: true;
+							snap: RnSnapInfo;
+							placement?: {
+								flowId: string;
+								flowName: string;
+								screenName?: string;
+								kind: "declared-match" | "auto-existing" | "auto-new";
+							};
+							captureMethod: "simctl";
+					  }
+					| { ok: false; error: string };
+			};
+			/**
 			 * Poll the current bridge route for the topbar live indicator.
 			 * Returns null when no bridge is connected for the project.
 			 * Cheap, designed to be called every 2s while a project is
