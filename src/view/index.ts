@@ -7438,6 +7438,7 @@ function applyRnState(s: AppState): void {
 			bezelDark.src = "iphone-17-dark.png";
 			bezelDark.alt = "";
 			bezel.append(bezelScreen, bezelLight, bezelDark);
+			attachBezelSizing(img, bezel, bezelScreen, [bezelLight, bezelDark]);
 
 			const cardLabel = ce("div", "rn-card-label");
 			const cardName = ce("p", "rn-card-name");
@@ -7934,6 +7935,112 @@ function saveSidebarCollapsed(value: boolean): void {
 	} catch {}
 }
 
+interface IpadBezel {
+	src: string;
+	/** Screen-cutout aspect (w/h) — matched against the screenshot's ratio. */
+	screenAspect: number;
+	/** Frame PNG aspect (w/h) — drives the bezel container's aspect-ratio. */
+	frameAspect: number;
+	/** Screen-cutout inset as a % of the frame, top/right/bottom/left. */
+	t: number;
+	r: number;
+	b: number;
+	l: number;
+}
+// iPad device frames (portrait + landscape), insets measured from each PNG's
+// transparent screen cutout. A capture is matched to the closest screenAspect
+// so an iPad screenshot gets an iPad frame instead of the iPhone bezel
+// (which squeezed 4:3 content into a 9:19.5 phone and clipped it).
+const IPAD_BEZELS: IpadBezel[] = [
+	{ src: "ipad-mini-portrait", screenAspect: 0.657, frameAspect: 890 / 1275, t: 5.57, r: 8.2, b: 5.57, l: 8.2 },
+	{ src: "ipad-11-portrait", screenAspect: 0.689, frameAspect: 940 / 1320, t: 4.17, r: 5.64, b: 4.17, l: 5.64 },
+	{ src: "ipad-13-portrait", screenAspect: 0.75, frameAspect: 1150 / 1500, t: 4.13, r: 5.13, b: 4.13, l: 5.13 },
+	{ src: "ipad-mini", screenAspect: 1.523, frameAspect: 1275 / 890, t: 8.2, r: 5.57, b: 8.2, l: 5.57 },
+	{ src: "ipad-11", screenAspect: 1.451, frameAspect: 1320 / 940, t: 5.64, r: 4.17, b: 5.64, l: 4.17 },
+	{ src: "ipad-13", screenAspect: 1.333, frameAspect: 1500 / 1150, t: 5.13, r: 4.13, b: 5.13, l: 4.13 },
+];
+const IPHONE_SCREEN_ASPECT = 0.488;
+
+/** Closest iPad frame to a screenshot ratio, or null to keep the iPhone
+ *  default when the capture is phone-shaped. Log-distance so portrait and
+ *  landscape match symmetrically. */
+function chooseBezel(ratio: number): IpadBezel | null {
+	if (!Number.isFinite(ratio) || ratio <= 0) return null;
+	let best: IpadBezel | null = null;
+	let bestDist = Math.abs(Math.log(ratio / IPHONE_SCREEN_ASPECT));
+	for (const b of IPAD_BEZELS) {
+		const d = Math.abs(Math.log(ratio / b.screenAspect));
+		if (d < bestDist) {
+			bestDist = d;
+			best = b;
+		}
+	}
+	return best;
+}
+
+/** Size a bezel (card or lightbox) to a screenshot's aspect. iPad frames get
+ *  the measured inset + frame PNG; phone-shaped captures reset to the CSS
+ *  default + iPhone frame. Inset-based so it works for both layouts. */
+function styleBezelForRatio(
+	bezel: HTMLElement,
+	screen: HTMLElement,
+	frames: HTMLImageElement[],
+	ratio: number,
+	iphoneLight: string,
+	iphoneDark: string,
+): void {
+	const choice = chooseBezel(ratio);
+	const s = screen.style;
+	if (!choice) {
+		bezel.style.aspectRatio = "";
+		s.top = "";
+		s.left = "";
+		s.right = "";
+		s.bottom = "";
+		s.width = "";
+		s.height = "";
+		s.borderRadius = "";
+		if (frames[0]) frames[0].src = iphoneLight;
+		if (frames[1]) frames[1].src = iphoneDark;
+		return;
+	}
+	bezel.style.aspectRatio = String(choice.frameAspect);
+	s.top = `${choice.t}%`;
+	s.left = `${choice.l}%`;
+	s.right = `${choice.r}%`;
+	s.bottom = `${choice.b}%`;
+	s.width = "auto";
+	s.height = "auto";
+	s.borderRadius = "2.6%";
+	for (const f of frames) f.src = `${choice.src}.png`;
+}
+
+/** Apply the right bezel once the screenshot's intrinsic size is known, and
+ *  re-apply whenever the image src changes (lightbox navigation). */
+function attachBezelSizing(
+	img: HTMLImageElement,
+	bezel: HTMLElement,
+	screen: HTMLElement,
+	frames: HTMLImageElement[],
+	iphoneLight = "iphone-17.png",
+	iphoneDark = "iphone-17-dark.png",
+): void {
+	const run = (): void => {
+		if (img.naturalWidth && img.naturalHeight) {
+			styleBezelForRatio(
+				bezel,
+				screen,
+				frames,
+				img.naturalWidth / img.naturalHeight,
+				iphoneLight,
+				iphoneDark,
+			);
+		}
+	};
+	if (img.complete) run();
+	img.addEventListener("load", run);
+}
+
 /**
  * Lightbox preview — opens a snap in a full-screen iPhone bezel like the web
  * frame page. ←/→ navigate within the flow's snaps, Esc closes.
@@ -8008,6 +8115,7 @@ function openSnapLightbox(
 	bezelDark.src = "iphone-17-dark.png";
 	bezelDark.alt = "";
 	bezel.append(bezelScreen, bezelLight, bezelDark);
+	attachBezelSizing(img, bezel, bezelScreen, [bezelLight, bezelDark]);
 
 	const nextBtn = ce("button", "rn-lightbox-nav rn-lightbox-next");
 	nextBtn.type = "button";

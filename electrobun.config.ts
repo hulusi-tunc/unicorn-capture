@@ -25,6 +25,12 @@ export default {
 			"assets/icons/logo.svg": "views/mainview/logo.svg",
 			"assets/icons/iphone-17.png": "views/mainview/iphone-17.png",
 			"assets/icons/iphone-17-dark.png": "views/mainview/iphone-17-dark.png",
+			"assets/icons/ipad-11.png": "views/mainview/ipad-11.png",
+			"assets/icons/ipad-11-portrait.png": "views/mainview/ipad-11-portrait.png",
+			"assets/icons/ipad-13.png": "views/mainview/ipad-13.png",
+			"assets/icons/ipad-13-portrait.png": "views/mainview/ipad-13-portrait.png",
+			"assets/icons/ipad-mini.png": "views/mainview/ipad-mini.png",
+			"assets/icons/ipad-mini-portrait.png": "views/mainview/ipad-mini-portrait.png",
 			"samples/devices.yaml": "samples/devices.yaml",
 		},
 		// Auto-update: when set, the running app polls
