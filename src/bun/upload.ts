@@ -712,21 +712,33 @@ async function uploadOne(args: {
 		}
 	}
 
+	const flowsWithFrames = manifest.flows.map((flow) => ({
+		...flow,
+		frames: flow.frames
+			.filter((f) => frameBytes.has(f.image))
+			.map((f) => ({
+				...f,
+				versions: (f.versions ?? []).filter((v) => versionBytes.has(v.image)),
+			})),
+	}));
+	// Keep flows that have frames PLUS their ancestor containers, so the
+	// gallery receives the full nesting. An empty grouping flow (e.g. "ADMIN"
+	// that only holds sub-flows, no snaps of its own) would otherwise be
+	// dropped here, orphaning its children to the top level when the gallery
+	// rebuilds the tree. Truly-empty leaf flows are still skipped.
+	const flowById = new Map(flowsWithFrames.map((f) => [f.id, f]));
+	const keepIds = new Set<string>();
+	for (const flow of flowsWithFrames) {
+		if (flow.frames.length === 0) continue;
+		let cur: (typeof flowsWithFrames)[number] | undefined = flow;
+		while (cur && !keepIds.has(cur.id)) {
+			keepIds.add(cur.id);
+			cur = cur.parentFlowId ? flowById.get(cur.parentFlowId) : undefined;
+		}
+	}
 	const filteredManifest: PlatformManifest = {
 		...manifest,
-		flows: manifest.flows
-			.map((flow) => ({
-				...flow,
-				frames: flow.frames
-					.filter((f) => frameBytes.has(f.image))
-					.map((f) => ({
-						...f,
-						versions: (f.versions ?? []).filter((v) =>
-							versionBytes.has(v.image),
-						),
-					})),
-			}))
-			.filter((flow) => flow.frames.length > 0),
+		flows: flowsWithFrames.filter((flow) => keepIds.has(flow.id)),
 	};
 
 	if (filteredManifest.flows.length === 0) {
