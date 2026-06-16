@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 
 export interface SimulatorWindow {
 	x: number;
@@ -114,6 +114,7 @@ export async function captureSimulator(
 			error: `simctl screenshot failed: ${trimmed || "unknown"}`,
 		};
 	}
+	correctScreenshotOrientation(outPath);
 	return { ok: true, path: outPath };
 }
 
@@ -344,4 +345,46 @@ export function bootDevice(udid: string): BootDeviceResult {
 	// Bring the Simulator window up so the live mirror has something to read.
 	spawnSync("/usr/bin/open", ["-a", "Simulator"], { stdio: "ignore" });
 	return { ok: true, alreadyBooted };
+}
+
+// ── Orientation correction ───────────────────────────────────────────────
+
+/** Read PNG pixel dimensions straight from the IHDR chunk — no decode, no deps. */
+function readPngSize(path: string): { w: number; h: number } | null {
+	try {
+		const fd = openSync(path, "r");
+		const buf = Buffer.alloc(24);
+		readSync(fd, buf, 0, 24, 0);
+		closeSync(fd);
+		// 8-byte PNG signature, 4-byte chunk length, "IHDR", 4-byte W, 4-byte H.
+		if (buf.toString("ascii", 12, 16) !== "IHDR") return null;
+		return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * `xcrun simctl io screenshot` writes the device's native (portrait)
+ * framebuffer even when the simulator is rotated to landscape, leaving the UI
+ * rotated 90° inside a portrait PNG. Detect that by comparing the shot's
+ * orientation to the live Simulator window, and rotate the file upright so it's
+ * stored — and later framed + uploaded — in the orientation the user sees.
+ *
+ * Direction: simctl's landscape capture comes out rotated 90° CCW, so a
+ * clockwise rotation (`sips -r 90`) puts it upright for the common
+ * (rotate-right) landscape. No-ops when the window orientation can't be read
+ * (e.g. Accessibility permission not granted) so capture still succeeds, just
+ * uncorrected.
+ */
+function correctScreenshotOrientation(outPath: string): void {
+	if (process.platform !== "darwin") return;
+	const size = readPngSize(outPath);
+	if (!size) return;
+	const win = getSimulatorWindow();
+	if (!win.ok) return;
+	const shotLandscape = size.w > size.h;
+	const winLandscape = win.rect.width > win.rect.height;
+	if (shotLandscape === winLandscape) return;
+	spawnSync("/usr/bin/sips", ["-r", "90", outPath], { stdio: "ignore" });
 }
