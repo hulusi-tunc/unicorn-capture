@@ -449,14 +449,10 @@ export function openWizardV2(deps: WizardDeps): void {
 			deps.log("Slug is required", "error");
 			return null;
 		}
-		if (!platformUrl) {
-			deps.log("Platform URL is required", "error");
-			return null;
-		}
-		if (!tokenField) {
-			deps.log("Setup token (or pgt_ project token) is required", "error");
-			return null;
-		}
+		// Platform URL + token are no longer required from the user: the bun side
+		// defaults the gallery URL and authenticates the create with the signed-in
+		// user's session, which also assigns the project to them. The fields stay
+		// available for advanced use (custom gallery URL, reusing a pgt_ token).
 
 		const checked = (id: string): boolean =>
 			Boolean((sec.querySelector<HTMLInputElement>(`#wiz2-opt-${id}`))?.checked);

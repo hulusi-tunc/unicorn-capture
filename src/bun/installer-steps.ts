@@ -45,12 +45,15 @@ const platformRegisterStep: Step = {
 			ctx.bag.projectToken = ctx.plan.projectToken;
 			return;
 		}
-		if (!ctx.plan.setupToken) {
-			throw new Error("Either token or setupToken is required");
+		if (!ctx.plan.setupToken && !ctx.plan.accessToken) {
+			throw new Error(
+				"Sign in (or provide a token / setup token) to register the project.",
+			);
 		}
 		const r = await createProjectOnPlatform({
 			url: ctx.plan.platformUrl,
 			setupToken: ctx.plan.setupToken,
+			accessToken: ctx.plan.accessToken,
 			slug: ctx.plan.slug,
 			name: ctx.plan.name ?? ctx.plan.slug,
 			platform: ctx.plan.platform,

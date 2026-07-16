@@ -118,6 +118,28 @@ export interface RnInitStep {
 	message: string;
 }
 
+/** The signed-in user, as resolved by the gallery. */
+export interface AuthUserInfo {
+	id: string;
+	email: string;
+	role: "agency" | "customer";
+	/** True for the single studio owner — sees every project. */
+	isOwner: boolean;
+}
+
+/**
+ * Session info exposed to the view. Deliberately token-free — the access /
+ * refresh tokens stay in the bun process (session.json) and never cross the
+ * RPC bridge into the webview.
+ */
+export interface AuthSessionInfo {
+	userId: string;
+	email: string;
+	role: "agency" | "customer";
+	isOwner: boolean;
+	signedInAt: string;
+}
+
 /**
  * Result of `detectRepo` — a read-only snapshot of a repo's setup state
  * before the wizard touches anything. Drives the new wizard's Phase 1
@@ -554,6 +576,34 @@ export type ScenarioRunnerRPC = {
 					  }
 					| { ok: false; error: string };
 			};
+			/** Sign in with email + password against the gallery's Supabase auth. */
+			signIn: {
+				params: { email: string; password: string };
+				response:
+					| { ok: true; session: AuthSessionInfo; projects: RnProjectInfo[] }
+					| { ok: false; error: string };
+			};
+			/** Clear the stored session and forget cached projects. */
+			signOut: {
+				params: Record<string, never>;
+				response: { ok: true };
+			};
+			/** Read the persisted session at boot to decide sign-in vs dashboard. */
+			getSession: {
+				params: Record<string, never>;
+				response: { session: AuthSessionInfo | null };
+			};
+			/**
+			 * Pull the projects assigned to the signed-in user (owner → all) from
+			 * the gallery, reconcile them into the local registry, and return the
+			 * registry so the dashboard can render scoped cards.
+			 */
+			listAssignedProjects: {
+				params: Record<string, never>;
+				response:
+					| { ok: true; user: AuthUserInfo; projects: RnProjectInfo[] }
+					| { ok: false; error: string; needsSignIn?: boolean };
+			};
 			listProjects: {
 				params: Record<string, never>;
 				response: { projects: RnProjectInfo[] };
@@ -786,7 +836,8 @@ export type ScenarioRunnerRPC = {
 					slug?: string;
 					baseUrl: string;
 					platformUrl: string;
-					setupToken: string;
+					/** Optional — a signed-in user creates via their session instead. */
+					setupToken?: string;
 					/**
 					 * Optional seed flows produced by `discoverWebRoutes`
 					 * + auto-grouping. When set, the orchestrator

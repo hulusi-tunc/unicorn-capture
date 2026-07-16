@@ -69,6 +69,11 @@ interface AppState {
 	expanded: Set<string>; // step uids that are expanded in editor
 	customViewport: { width: number; height: number } | null;
 	projectKey: string | null;
+	/** Signed-in user (token-free; tokens stay in the bun process). Null = signed out. */
+	session: import("../lib/rpc").AuthSessionInfo | null;
+	/** True once the boot session check has run — gates the sign-in screen so it
+	 *  doesn't flash for an already-signed-in user while hydrating. */
+	authChecked: boolean;
 	rn: {
 		clientCount: number;
 		projects: string[];
@@ -146,6 +151,8 @@ const state = new Store<AppState>({
 	expanded: new Set(),
 	customViewport: null,
 	projectKey: null,
+	session: null,
+	authChecked: false,
 	rn: {
 		clientCount: 0,
 		projects: [],
@@ -866,6 +873,29 @@ let initialized = false;
 
 function render(): void {
 	const s = state.get();
+
+	// Auth gate — nothing else mounts until the user is signed in. While the
+	// boot session check is still running (authChecked === false), keep every
+	// root hidden so an already-signed-in user never sees the sign-in form flash.
+	ensureSigninMounted();
+	if (s.session == null) {
+		setSigninVisible(s.authChecked);
+		setDashVisible(false);
+		setRnVisible(false);
+		setWebVisible(false);
+		setAppVisible(false);
+		if (
+			s.authChecked &&
+			signinRefs &&
+			!signinRefs.email.value &&
+			document.activeElement !== signinRefs.email
+		) {
+			signinRefs.email.focus();
+		}
+		return;
+	}
+	setSigninVisible(false);
+
 	const slug = s.rn.selectedProjectSlug;
 	const onDashboard = slug == null;
 	const inProjectType = onDashboard ? null : projectTypeOf(slug);
@@ -3257,10 +3287,22 @@ syncGlobalTopbar();
 
 state.subscribe(() => render());
 
-// Load project registry unconditionally at boot so the dashboard cards
-// render immediately. Previously this only fired when source.kind became
-// "iossim", which left the dashboard empty until the user opened a project.
-void refreshProjectRegistry();
+// Auth-gated boot: check for a persisted session. If signed in, load the
+// assigned-project registry so the dashboard renders immediately; otherwise
+// flip authChecked so render() shows the sign-in screen (not a blank dashboard).
+void (async () => {
+	try {
+		const { session } = await req.getSession({});
+		if (session) {
+			state.set((cur) => ({ ...cur, session, authChecked: true }));
+			await refreshProjectRegistry();
+		} else {
+			state.set((cur) => ({ ...cur, authChecked: true }));
+		}
+	} catch {
+		state.set((cur) => ({ ...cur, authChecked: true }));
+	}
+})();
 
 log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
 
@@ -3507,6 +3549,143 @@ function setAppVisible(visible: boolean): void {
 	if (app) app.style.display = visible ? "" : "none";
 }
 
+// ─── SIGN IN ───
+// First gate: a centered email + password card. On success the bun process
+// stores the Supabase session (session.json) and returns the user's assigned
+// projects, which become the dashboard registry. Sign-out clears the session.
+interface SigninRefs {
+	root: HTMLDivElement;
+	email: HTMLInputElement;
+	password: HTMLInputElement;
+	submit: HTMLButtonElement;
+	error: HTMLDivElement;
+}
+let signinRefs: SigninRefs | null = null;
+
+function buildSignin(): SigninRefs {
+	const root = ce("div", "signin-root");
+	root.id = "signin-root";
+	root.style.display = "none";
+	root.style.position = "fixed";
+	root.style.inset = "0";
+	root.style.zIndex = "1000";
+	root.style.alignItems = "center";
+	root.style.justifyContent = "center";
+	root.style.padding = "24px";
+	root.style.background = "var(--bg-0)";
+
+	const card = ce("div", "signin-card");
+	card.style.width = "360px";
+	card.style.maxWidth = "90vw";
+	card.style.display = "flex";
+	card.style.flexDirection = "column";
+	card.style.gap = "12px";
+	card.style.padding = "28px";
+	card.style.background = "var(--bg-1)";
+	card.style.border = "1px solid var(--bg-3)";
+	card.style.borderRadius = "14px";
+	card.style.boxShadow = "0 12px 40px rgba(0,0,0,0.25)";
+
+	const title = ce("h1", "dash-title");
+	title.textContent = "Sign in to Unicorn Capture";
+	const sub = ce("p", "dash-sub");
+	sub.textContent = "Use your Unicorn Studio gallery account.";
+
+	const email = ce("input", "input");
+	email.type = "email";
+	email.placeholder = "you@studio.com";
+	email.autocomplete = "username";
+
+	const password = ce("input", "input");
+	password.type = "password";
+	password.placeholder = "Password";
+	password.autocomplete = "current-password";
+
+	const submit = ce("button", "btn btn-primary");
+	submit.type = "button";
+	submit.textContent = "Sign in";
+
+	const error = ce("div", "signin-error");
+	error.style.color = "var(--danger, #e5484d)";
+	error.style.fontSize = "13px";
+	error.style.minHeight = "16px";
+
+	const onSubmit = (): void => void doSignIn();
+	submit.addEventListener("click", onSubmit);
+	email.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") password.focus();
+	});
+	password.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") onSubmit();
+	});
+
+	card.append(title, sub, email, password, submit, error);
+	root.appendChild(card);
+	return { root, email, password, submit, error };
+}
+
+function ensureSigninMounted(): SigninRefs {
+	if (!signinRefs) {
+		document.getElementById("signin-root")?.remove();
+		signinRefs = buildSignin();
+		document.body.appendChild(signinRefs.root);
+	}
+	return signinRefs;
+}
+
+function setSigninVisible(visible: boolean): void {
+	if (!signinRefs) return;
+	signinRefs.root.style.display = visible ? "flex" : "none";
+}
+
+async function doSignIn(): Promise<void> {
+	if (!signinRefs) return;
+	const email = signinRefs.email.value.trim();
+	const password = signinRefs.password.value;
+	if (!email || !password) {
+		signinRefs.error.textContent = "Enter your email and password.";
+		return;
+	}
+	signinRefs.error.textContent = "";
+	signinRefs.submit.disabled = true;
+	signinRefs.submit.textContent = "Signing in…";
+	try {
+		const res = await req.signIn({ email, password });
+		if (!res.ok) {
+			signinRefs.error.textContent = res.error;
+			return;
+		}
+		signinRefs.password.value = "";
+		state.set((cur) => ({
+			...cur,
+			session: res.session,
+			authChecked: true,
+			rn: { ...cur.rn, registry: res.projects, selectedProjectSlug: null },
+		}));
+	} catch (err) {
+		signinRefs.error.textContent =
+			(err as Error)?.message || "Sign-in failed. Please try again.";
+	} finally {
+		if (signinRefs) {
+			signinRefs.submit.disabled = false;
+			signinRefs.submit.textContent = "Sign in";
+		}
+	}
+}
+
+async function doSignOut(): Promise<void> {
+	try {
+		await req.signOut({});
+	} catch {
+		// Clear locally regardless of network outcome.
+	}
+	state.set((cur) => ({
+		...cur,
+		session: null,
+		rn: { ...cur.rn, registry: [], selectedProjectSlug: null },
+	}));
+}
+
 // ─── DASHBOARD (project picker) ───
 // First screen: grid of project cards from registry, search filter, Add modal.
 // Click a card → enters that project (mobile or web view based on type).
@@ -3514,6 +3693,7 @@ interface DashRefs {
 	root: HTMLDivElement;
 	cardsGrid: HTMLDivElement;
 	emptyState: HTMLDivElement;
+	accountLabel: HTMLSpanElement;
 }
 let dashRefs: DashRefs | null = null;
 
@@ -3555,6 +3735,22 @@ function buildDashboard(): DashRefs {
 	cleanupRow.append(cleanupBtn, clearCacheBtn);
 	heading.appendChild(cleanupRow);
 
+	// Signed-in account + sign out.
+	const accountRow = ce("div", "dash-account-row");
+	accountRow.style.display = "flex";
+	accountRow.style.alignItems = "center";
+	accountRow.style.gap = "10px";
+	accountRow.style.marginTop = "8px";
+	const accountLabel = ce("span", "dash-account");
+	accountLabel.style.fontSize = "12px";
+	accountLabel.style.opacity = "0.7";
+	const signOutBtn = ce("button", "btn btn-ghost btn-sm");
+	signOutBtn.type = "button";
+	signOutBtn.textContent = "Sign out";
+	signOutBtn.addEventListener("click", () => void doSignOut());
+	accountRow.append(accountLabel, signOutBtn);
+	heading.appendChild(accountRow);
+
 	const cardsGrid = ce("div", "dash-grid");
 	const emptyState = ce("div", "dash-empty");
 	const emptyIcon = ce("div", "dash-empty-icon");
@@ -3569,7 +3765,7 @@ function buildDashboard(): DashRefs {
 	inner.append(heading, cardsGrid, emptyState);
 	root.appendChild(inner);
 
-	return { root, cardsGrid, emptyState };
+	return { root, cardsGrid, emptyState, accountLabel };
 }
 
 function ensureDashMounted(): DashRefs {
@@ -3588,6 +3784,10 @@ function setDashVisible(visible: boolean): void {
 
 function renderDashboardCards(refs: DashRefs): void {
 	const r = state.get().rn;
+	const sess = state.get().session;
+	refs.accountLabel.textContent = sess
+		? `Signed in as ${sess.email}${sess.isOwner ? " · Owner" : ""}`
+		: "";
 	const q = dashSearchQuery.trim().toLowerCase();
 	const filtered = r.registry.filter((p) => {
 		if (!q) return true;
@@ -3930,28 +4130,34 @@ function openAddSimulatorForm(): void {
 		const name = form.name.trim();
 		const platformUrl = form.platformUrl.trim().replace(/\/$/, "");
 		const token = form.token.trim();
-		if (!name || !platformUrl || !token) {
-			form.error = "Name, gallery URL, and a token are all required.";
+		if (!name) {
+			form.error = "Name is required.";
 			render();
 			return;
 		}
-		try {
-			new URL(platformUrl);
-		} catch {
-			form.error = "Gallery URL must be a valid URL (include https://).";
-			render();
-			return;
+		// Gallery URL + token are optional for a signed-in user: the create is
+		// authenticated by the session (which also assigns the project), and the
+		// bun side defaults the gallery URL. Only validate a custom URL if typed.
+		if (platformUrl) {
+			try {
+				new URL(platformUrl);
+			} catch {
+				form.error = "Gallery URL must be a valid URL (include https://).";
+				render();
+				return;
+			}
 		}
 		form.busy = true;
 		form.error = undefined;
 		render();
-		// One field, two token kinds: a pgt_ token reuses an existing gallery
-		// project; anything else is treated as a setup token that creates one.
+		// Optional token field, two kinds: a pgt_ token reuses an existing gallery
+		// project; anything else is treated as a setup token. With neither, the
+		// signed-in session creates + assigns the project.
 		const isProjectToken = token.startsWith("pgt_");
 		const r = await req.createDeviceProject({
 			name,
 			platformUrl,
-			...(isProjectToken ? { token } : { setupToken: token }),
+			...(token ? (isProjectToken ? { token } : { setupToken: token }) : {}),
 		});
 		if (!r.ok) {
 			form.busy = false;
@@ -4128,9 +4334,12 @@ function openAddWebForm(): void {
 			const baseUrl = wiz.baseUrl.trim();
 			const platformUrl = wiz.platformUrl.trim().replace(/\/$/, "");
 			const setupToken = wiz.setupToken.trim();
-			if (!name || !baseUrl || !platformUrl || !setupToken) {
-				wiz.error =
-					"Name, base URL, platform URL, and setup token are all required.";
+			// Platform URL + setup token are optional for a signed-in user: the
+			// create is authenticated by the session (which assigns the project)
+			// and the bun side defaults the gallery URL. Base URL is still required
+			// — a web project needs somewhere to capture from.
+			if (!name || !baseUrl) {
+				wiz.error = "Name and base URL are required.";
 				render();
 				return;
 			}
@@ -6866,10 +7075,33 @@ function showPushDialog(opts: {
 
 async function refreshProjectRegistry(): Promise<void> {
 	try {
-		const r = await req.listProjects({});
-		state.set((cur) => ({ ...cur, rn: { ...cur.rn, registry: r.projects } }));
+		const r = await req.listAssignedProjects({});
+		if (!r.ok) {
+			// Session expired / revoked → drop to the sign-in screen.
+			if (r.needsSignIn) {
+				state.set((cur) => ({
+					...cur,
+					session: null,
+					rn: { ...cur.rn, registry: [], selectedProjectSlug: null },
+				}));
+			}
+			return;
+		}
+		state.set((cur) => ({
+			...cur,
+			session: cur.session
+				? {
+						...cur.session,
+						isOwner: r.user.isOwner,
+						role: r.user.role,
+						email: r.user.email,
+					}
+				: cur.session,
+			rn: { ...cur.rn, registry: r.projects },
+		}));
 	} catch {
-		// ignore
+		// ignore — keep the last-known registry so a transient network blip
+		// doesn't blank the dashboard.
 	}
 }
 
@@ -8633,7 +8865,27 @@ function ensureRouteIndicatorPolling(): void {
 	}, 2000);
 }
 
+function stopRnPolling(): void {
+	if (rnPollTimer) {
+		clearInterval(rnPollTimer);
+		rnPollTimer = null;
+	}
+	if (rnRoutePollTimer) {
+		clearInterval(rnRoutePollTimer);
+		rnRoutePollTimer = null;
+	}
+}
+
 state.subscribe((s) => {
+	// Never poll or auto-refresh while signed out. Critically, this also breaks a
+	// busy-loop: when a session expires mid-project, refreshProjectRegistry's
+	// needsSignIn branch sets session=null + registry=[] while source.kind stays
+	// "iossim" — without this guard that state change would re-enter the
+	// registry-empty refresh below and spin forever.
+	if (!s.session) {
+		stopRnPolling();
+		return;
+	}
 	if (s.source.kind === "iossim") {
 		ensureRnPolling();
 		ensureRouteIndicatorPolling();

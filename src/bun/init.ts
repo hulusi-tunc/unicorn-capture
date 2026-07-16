@@ -65,6 +65,13 @@ export interface InitInputs {
 	platformUrl: string;
 	setupToken?: string;
 	token?: string;
+	/**
+	 * Signed-in user's Supabase access token. Preferred over setupToken when
+	 * creating the project so the gallery attributes it (created_by) AND assigns
+	 * it to the creator (project_members) — that's what makes it show up in the
+	 * creator's Capture dashboard.
+	 */
+	accessToken?: string;
 }
 
 export interface InitStep {
@@ -677,7 +684,10 @@ export function removeCaptureProject(slug: string): boolean {
 // ── Platform call ──────────────────────────────────────────────────────────
 export async function createProjectOnPlatform(args: {
 	url: string;
-	setupToken: string;
+	/** Shared setup token (legacy/CI). Used only when no accessToken is given. */
+	setupToken?: string;
+	/** Signed-in user's access token — preferred, so the creator is assigned. */
+	accessToken?: string;
 	slug: string;
 	name: string;
 	platform: string;
@@ -692,13 +702,19 @@ export async function createProjectOnPlatform(args: {
 	/** Present when an existing project with this slug was returned as-is. */
 	reused?: boolean;
 }> {
+	const bearer = args.accessToken?.trim() || args.setupToken?.trim();
+	if (!bearer) {
+		throw new Error(
+			"You must be signed in (or provide a setup token) to create a project.",
+		);
+	}
 	let resp: Response;
 	try {
 		resp = await fetch(`${args.url.replace(/\/$/, "")}/api/projects`, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				authorization: `Bearer ${args.setupToken}`,
+				authorization: `Bearer ${bearer}`,
 			},
 			body: JSON.stringify({
 				slug: args.slug,
@@ -826,10 +842,10 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 	let projectToken = input.token?.trim();
 	let projectId: string | undefined;
 	if (!projectToken) {
-		if (!input.setupToken) {
+		if (!input.setupToken && !input.accessToken) {
 			return {
 				ok: false,
-				error: "Either token or setupToken is required.",
+				error: "Sign in (or provide a token / setup token) to create a project.",
 				steps,
 			};
 		}
@@ -837,6 +853,7 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 			const r = await createProjectOnPlatform({
 				url: platformUrl,
 				setupToken: input.setupToken,
+				accessToken: input.accessToken,
 				slug,
 				name,
 				platform: input.platform,

@@ -29,6 +29,16 @@ import {
 	resolveProjectByToken,
 } from "./init";
 import {
+	type AssignedProject,
+	type CaptureSession,
+	clearSession,
+	getValidAccessToken,
+	listAssignedProjects as authListAssignedProjects,
+	loadSession,
+	signIn as authSignIn,
+} from "./auth";
+import { GALLERY_URL } from "./config";
+import {
 	type InstallOutcome,
 	type InstallPlan,
 	runInstaller,
@@ -825,6 +835,63 @@ function freeCurrentSource(): void {
 // `getPendingUpdate` if it wasn't yet listening when the one-shot push fired.
 let pendingUpdate: UpdateReadyMessage | null = null;
 
+/** Strip tokens from a session before it crosses the RPC bridge to the view. */
+function toSessionInfo(s: CaptureSession): {
+	userId: string;
+	email: string;
+	role: "agency" | "customer";
+	isOwner: boolean;
+	signedInAt: string;
+} {
+	return {
+		userId: s.userId,
+		email: s.email,
+		role: s.role,
+		isOwner: s.isOwner,
+		signedInAt: s.signedInAt,
+	};
+}
+
+/**
+ * Upsert the gallery's assigned-project list into the local registry and return
+ * the assigned set (which becomes the dashboard registry — so members only SEE
+ * assigned projects, the owner sees all). Local fields the gallery doesn't track
+ * (repoPath, rnAppDir, baseUrl) are preserved via the merge.
+ *
+ * We deliberately do NOT prune projects.json down to the assigned set:
+ * projects.json stays a non-destructive local cache. An earlier version pruned
+ * here, which silently deleted a member's locally-onboarded project (and its
+ * repoPath/rnAppDir) in the window before it had been assigned server-side —
+ * e.g. right after the mobile install wizard finished. Scoping is enforced by
+ * what we RETURN, not by deleting on-disk wiring.
+ */
+function reconcileAssignedProjects(
+	projects: AssignedProject[],
+): CaptureProjectEntry[] {
+	const uploadUrl = `${GALLERY_URL}/api/captures/upload`;
+	const existing = loadCaptureProjects();
+	const existingBySlug = new Map(existing.map((e) => [e.slug, e]));
+
+	const assigned: CaptureProjectEntry[] = [];
+	for (const p of projects) {
+		if (!p.projectToken) continue; // can't push/pull without a token
+		const prev = existingBySlug.get(p.slug);
+		const entry: CaptureProjectEntry = {
+			...prev,
+			slug: p.slug,
+			name: p.name,
+			platform: p.platform,
+			projectToken: p.projectToken,
+			uploadUrl,
+			registeredAt: prev?.registeredAt ?? new Date().toISOString(),
+		};
+		registerWithCapture(entry);
+		assigned.push(entry);
+	}
+
+	return assigned;
+}
+
 const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 	maxRequestTime: 600000,
 	handlers: {
@@ -1292,12 +1359,17 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 			runInstaller: async ({ plan: planInput }) => {
 				// Fingerprint comes over the wire; re-validate that the picked
 				// rnAppDir still exists on disk before we touch anything.
+				// Prefer the signed-in user's token so the new project is attributed
+				// + assigned to them (and thus appears in their dashboard); default
+				// the gallery URL when the wizard field was left blank.
+				const accessToken = (await getValidAccessToken()) ?? undefined;
 				const installPlan: InstallPlan = {
 					slug: planInput.slug,
 					name: planInput.name,
 					platform: planInput.platform,
-					platformUrl: planInput.platformUrl,
+					platformUrl: planInput.platformUrl?.trim() || GALLERY_URL,
 					setupToken: planInput.setupToken,
+					accessToken,
 					projectToken: planInput.projectToken,
 					fingerprint: planInput.fingerprint as InstallPlan["fingerprint"],
 					options: planInput.options,
@@ -1375,6 +1447,28 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				} catch (err) {
 					return { ok: false, error: (err as Error).message };
 				}
+			},
+			signIn: async ({ email, password }) => {
+				const res = await authSignIn(email, password);
+				if (!res.ok) return { ok: false, error: res.error };
+				const projects = reconcileAssignedProjects(res.projects);
+				return { ok: true, session: toSessionInfo(res.session), projects };
+			},
+			signOut: async () => {
+				clearSession();
+				return { ok: true };
+			},
+			getSession: async () => {
+				const s = loadSession();
+				return { session: s ? toSessionInfo(s) : null };
+			},
+			listAssignedProjects: async () => {
+				const res = await authListAssignedProjects();
+				if (!res.ok) {
+					return { ok: false, error: res.error, needsSignIn: res.needsSignIn };
+				}
+				const projects = reconcileAssignedProjects(res.projects);
+				return { ok: true, user: res.user, projects };
 			},
 			listProjects: async () => {
 				// Sync archive status with platform on every list call. If the
@@ -1561,7 +1655,14 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				};
 			},
 			initProject: async (input) => {
-				const result = await initProject(input);
+				// Prefer the signed-in user's token so the new project is attributed
+				// + assigned to them; fall back to the gallery URL if none was typed.
+				const accessToken = (await getValidAccessToken()) ?? undefined;
+				const result = await initProject({
+					...input,
+					platformUrl: input.platformUrl?.trim() || GALLERY_URL,
+					accessToken,
+				});
 				if (!result.ok) {
 					return { ok: false, error: result.error, steps: result.steps };
 				}
@@ -1584,7 +1685,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				slug?: string;
 				baseUrl: string;
 				platformUrl: string;
-				setupToken: string;
+				setupToken?: string;
 				seedFlows?: Array<{ id: string; name: string; routes: string[] }>;
 			}) => {
 				const { name, slug, baseUrl, platformUrl, setupToken, seedFlows } =
@@ -1615,15 +1716,18 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						error: "Slug must be lowercase kebab-case (a–z, 0–9, hyphen).",
 					};
 				}
+				const galleryUrl = platformUrl?.trim() || GALLERY_URL;
+				const accessToken = (await getValidAccessToken()) ?? undefined;
 				try {
 					const platform = await createProjectOnPlatform({
-						url: platformUrl,
+						url: galleryUrl,
 						setupToken,
+						accessToken,
 						slug: computedSlug,
 						name: trimmedName,
 						platform: "web",
 					});
-					const uploadUrl = `${platformUrl.replace(/\/$/, "")}/api/captures/upload`;
+					const uploadUrl = `${galleryUrl.replace(/\/$/, "")}/api/captures/upload`;
 					registerWithCapture({
 						slug: platform.slug,
 						name: platform.name,
@@ -1686,22 +1790,24 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						.replace(/^-|-$/g, "")
 						.slice(0, 48);
 				const trimmedName = name.trim();
-				const trimmedPlatformUrl = platformUrl.trim().replace(/\/$/, "");
+				const trimmedPlatformUrl = (platformUrl.trim() || GALLERY_URL).replace(
+					/\/$/,
+					"",
+				);
 				const suppliedToken = input.token?.trim();
 				const setupToken = input.setupToken?.trim();
+				const accessToken = (await getValidAccessToken()) ?? undefined;
 				if (!trimmedName) return { ok: false, error: "Name is required." };
-				if (!trimmedPlatformUrl)
-					return { ok: false, error: "Gallery URL is required." };
 				try {
 					new URL(trimmedPlatformUrl);
 				} catch {
 					return { ok: false, error: "Gallery URL is not a valid URL." };
 				}
-				if (!suppliedToken && !setupToken) {
+				if (!suppliedToken && !setupToken && !accessToken) {
 					return {
 						ok: false,
 						error:
-							"A setup token or an existing project token (pgt_…) is required.",
+							"Sign in, or provide a setup token or an existing project token (pgt_…).",
 					};
 				}
 				const computedSlug =
@@ -1751,7 +1857,8 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					}
 					const platform = await createProjectOnPlatform({
 						url: trimmedPlatformUrl,
-						setupToken: setupToken!,
+						setupToken,
+						accessToken,
 						slug: computedSlug,
 						name: trimmedName,
 						platform: "ios",
