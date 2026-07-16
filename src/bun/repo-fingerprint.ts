@@ -19,6 +19,17 @@ export type RnLayout =
 	| "expo-classic"
 	| "unknown";
 
+/**
+ * Which navigation library the app uses — orthogonal to `rnLayout` (an
+ * expo-classic or rn-cli app commonly drives navigation with react-navigation).
+ * Decides which snap-bridge adapter the installer wires and whether the
+ * Expo-Router-only `snap-flows-scan` (which walks an `app/` route tree) can
+ * run at all. `expo-router` implies the file-based router; `react-navigation`
+ * means `@react-navigation/*` is a dependency; `unknown` is neither (e.g. a
+ * fully home-rolled navigator).
+ */
+export type NavLibrary = "expo-router" | "react-navigation" | "unknown";
+
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
 export interface RnCandidate {
@@ -51,6 +62,7 @@ export interface RepoFingerprint {
 	picked: RnCandidate | null;
 	pickedNotFoundReason?: string;
 	rnLayout: RnLayout;
+	navLibrary: NavLibrary;
 	snapBridge: SnapBridgeState & { suggested: string };
 	viewShot: { installed: boolean; podsInstalled: boolean };
 	layoutFile: {
@@ -80,6 +92,9 @@ export function fingerprintRepo(repoPath: string): RepoFingerprint {
 
 	const rnAppDir = picked?.rnAppDir ?? null;
 	const rnLayout = rnAppDir ? detectRnLayout(rnAppDir) : "unknown";
+	const navLibrary = rnAppDir
+		? detectNavLibrary(rnAppDir, rnLayout)
+		: "unknown";
 	const snapBridge = detectSnapBridge(workspaceRoot, rnAppDir);
 	const viewShot = rnAppDir
 		? detectViewShot(rnAppDir, workspaceRoot)
@@ -108,6 +123,7 @@ export function fingerprintRepo(repoPath: string): RepoFingerprint {
 			? undefined
 			: "Couldn't find an Expo / React Native package. Looked for `expo`, `expo-router`, or `react-native` in package.json under the repo, its direct children, and one level into apps/, packages/.",
 		rnLayout,
+		navLibrary,
 		snapBridge,
 		viewShot,
 		layoutFile,
@@ -231,6 +247,29 @@ function detectRnLayout(rnAppDir: string): RnLayout {
 	};
 	if (deps["expo"]) return "expo-classic";
 	if (deps["react-native"]) return "rn-cli";
+	return "unknown";
+}
+
+/**
+ * Which navigation library the app uses. Expo Router (file-based routing)
+ * takes precedence — its `useSnapAutoSync` reads router hooks directly. Any
+ * `@react-navigation/*` dependency means the react-navigation adapter applies
+ * instead. Apps with neither (home-rolled navigators) fall through to
+ * `unknown`; the host wires `setSnapState` manually.
+ */
+function detectNavLibrary(rnAppDir: string, rnLayout: RnLayout): NavLibrary {
+	if (rnLayout === "expo-router") return "expo-router";
+	const pkg = readPkgJson(join(rnAppDir, "package.json"));
+	const deps: Record<string, unknown> = {
+		...((pkg?.dependencies as Record<string, unknown> | undefined) ?? {}),
+		...((pkg?.devDependencies as Record<string, unknown> | undefined) ?? {}),
+	};
+	// expo-router is itself built on react-navigation, but the `expo-router`
+	// branch above already claimed those apps — so reaching here with a
+	// @react-navigation/* dep means react-navigation is the app's own router.
+	if (Object.keys(deps).some((d) => d.startsWith("@react-navigation/"))) {
+		return "react-navigation";
+	}
 	return "unknown";
 }
 

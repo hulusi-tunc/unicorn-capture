@@ -7,17 +7,17 @@
 		"start": "electrobun dev",
 		"dev": "electrobun dev --watch",
 		"snap": "bun src/bun/cli.ts",
-		"build": "electrobun build",
-		"build:canary": "electrobun build --env=canary",
-		"build:stable": "electrobun build --env=stable",
-		"build:signed": "bash -c 'set -a; [ -f .env.build ] && source .env.build; set +a; electrobun build --env=stable'",
+		"build": "PATH=\"$PWD/scripts/binshim:$PATH\" electrobun build",
+		"build:canary": "PATH=\"$PWD/scripts/binshim:$PATH\" electrobun build --env=canary",
+		"build:stable": "PATH=\"$PWD/scripts/binshim:$PATH\" electrobun build --env=stable",
+		"build:signed": "bash -c 'set -a; [ -f .env.build ] && source .env.build; set +a; PATH=\"$PWD/scripts/binshim:$PATH\" electrobun build --env=stable'",
 		"release:publish": "bash scripts/publish-release.sh",
 		"release:publish:canary": "bash scripts/publish-release.sh canary",
 		"release:publish:stable": "bash scripts/publish-release.sh stable",
 		"release": "bun run build:signed && bun run release:publish:stable",
 		"lint": "biome check src/",
 		"lint:fix": "biome check --write src/",
-		"ci": "biome check src/ && electrobun build"
+		"ci": "biome check src/ && PATH=\"$PWD/scripts/binshim:$PATH\" electrobun build"
 	},
 	"dependencies": {
 		"electrobun": "^1.18.1",

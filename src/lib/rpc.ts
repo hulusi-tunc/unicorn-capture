@@ -118,6 +118,28 @@ export interface RnInitStep {
 	message: string;
 }
 
+/** The signed-in user, as resolved by the gallery. */
+export interface AuthUserInfo {
+	id: string;
+	email: string;
+	role: "agency" | "customer";
+	/** True for the single studio owner — sees every project. */
+	isOwner: boolean;
+}
+
+/**
+ * Session info exposed to the view. Deliberately token-free — the access /
+ * refresh tokens stay in the bun process (session.json) and never cross the
+ * RPC bridge into the webview.
+ */
+export interface AuthSessionInfo {
+	userId: string;
+	email: string;
+	role: "agency" | "customer";
+	isOwner: boolean;
+	signedInAt: string;
+}
+
 /**
  * Result of `detectRepo` — a read-only snapshot of a repo's setup state
  * before the wizard touches anything. Drives the new wizard's Phase 1
@@ -142,6 +164,7 @@ export interface RepoFingerprint {
 	} | null;
 	pickedNotFoundReason?: string;
 	rnLayout: "expo-router" | "rn-cli" | "expo-classic" | "unknown";
+	navLibrary: "expo-router" | "react-navigation" | "unknown";
 	snapBridge:
 		| { state: "missing"; suggested: string }
 		| { state: "floating"; current: string; suggested: string }
@@ -184,6 +207,14 @@ export interface InstallProgressMessage {
 	message: string;
 	progress?: number;
 	outputLine?: string;
+}
+
+/** Pushed bun→view once an update has been downloaded and is ready to apply. */
+export interface UpdateReadyMessage {
+	/** Version string from the freshly fetched update.json. */
+	version: string;
+	/** Content hash of the new build (what the updater compares on). */
+	hash: string;
 }
 
 /**
@@ -248,6 +279,20 @@ export interface RnInitOutcome {
 export type ScenarioRunnerRPC = {
 	bun: {
 		requests: {
+			/** View asks bun to apply the downloaded update and relaunch. */
+			applyUpdate: {
+				params: Record<string, never>;
+				response: { ok: boolean; error?: string };
+			};
+			/**
+			 * View pulls any update that finished downloading before its RPC
+			 * handler was live (the push is fire-once and unbuffered). Called
+			 * once at view bootstrap so a won launch-race still shows the banner.
+			 */
+			getPendingUpdate: {
+				params: Record<string, never>;
+				response: { update: UpdateReadyMessage | null };
+			};
 			resolveSource: {
 				params: SourceInput;
 				response: {
@@ -531,6 +576,34 @@ export type ScenarioRunnerRPC = {
 					  }
 					| { ok: false; error: string };
 			};
+			/** Sign in with email + password against the gallery's Supabase auth. */
+			signIn: {
+				params: { email: string; password: string };
+				response:
+					| { ok: true; session: AuthSessionInfo; projects: RnProjectInfo[] }
+					| { ok: false; error: string };
+			};
+			/** Clear the stored session and forget cached projects. */
+			signOut: {
+				params: Record<string, never>;
+				response: { ok: true };
+			};
+			/** Read the persisted session at boot to decide sign-in vs dashboard. */
+			getSession: {
+				params: Record<string, never>;
+				response: { session: AuthSessionInfo | null };
+			};
+			/**
+			 * Pull the projects assigned to the signed-in user (owner → all) from
+			 * the gallery, reconcile them into the local registry, and return the
+			 * registry so the dashboard can render scoped cards.
+			 */
+			listAssignedProjects: {
+				params: Record<string, never>;
+				response:
+					| { ok: true; user: AuthUserInfo; projects: RnProjectInfo[] }
+					| { ok: false; error: string; needsSignIn?: boolean };
+			};
 			listProjects: {
 				params: Record<string, never>;
 				response: { projects: RnProjectInfo[] };
@@ -643,6 +716,63 @@ export type ScenarioRunnerRPC = {
 				response: { ok: true; output: string } | { ok: false; error: string };
 			};
 			/**
+			 * List available iOS Simulator devices (iPhone + iPad) for the
+			 * device picker. Booted devices sort first. macOS-only.
+			 */
+			listDevices: {
+				params: Record<string, never>;
+				response:
+					| {
+							ok: true;
+							devices: Array<{
+								udid: string;
+								name: string;
+								state: string;
+								kind: "iphone" | "ipad" | "other";
+								runtime: string;
+							}>;
+					  }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Boot a specific simulator device by udid, then open Simulator.app.
+			 * Already-booted devices resolve ok. macOS-only.
+			 */
+			bootDevice: {
+				params: { udid: string };
+				response:
+					| { ok: true; alreadyBooted: boolean }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Bridge-less capture: screenshot a booted simulator via simctl and
+			 * append it as a frame — no snap-bridge required. Works for any app
+			 * on the simulator (Flutter, native iOS, iPad, or an RN app without
+			 * the bridge). `deviceUdid` targets a specific device; omit for the
+			 * single booted one. `forceFlowId` pins placement.
+			 */
+			deviceSnap: {
+				params: {
+					projectSlug: string;
+					deviceUdid?: string;
+					displayName?: string;
+					forceFlowId?: string;
+				};
+				response:
+					| {
+							ok: true;
+							snap: RnSnapInfo;
+							placement?: {
+								flowId: string;
+								flowName: string;
+								screenName?: string;
+								kind: "declared-match" | "auto-existing" | "auto-new";
+							};
+							captureMethod: "simctl";
+					  }
+					| { ok: false; error: string };
+			};
+			/**
 			 * Poll the current bridge route for the topbar live indicator.
 			 * Returns null when no bridge is connected for the project.
 			 * Cheap, designed to be called every 2s while a project is
@@ -706,7 +836,8 @@ export type ScenarioRunnerRPC = {
 					slug?: string;
 					baseUrl: string;
 					platformUrl: string;
-					setupToken: string;
+					/** Optional — a signed-in user creates via their session instead. */
+					setupToken?: string;
 					/**
 					 * Optional seed flows produced by `discoverWebRoutes`
 					 * + auto-grouping. When set, the orchestrator
@@ -725,6 +856,31 @@ export type ScenarioRunnerRPC = {
 							restored?: boolean;
 							reused?: boolean;
 							seededFlows?: number;
+					  }
+					| { ok: false; error: string };
+			};
+			/**
+			 * Create a "device project": platform ios, NO repo, NO baseUrl, NO
+			 * snap-bridge. For capturing any app in the simulator (Flutter,
+			 * native iOS, iPad, or RN without the bridge) via simctl. Accepts
+			 * either a `setupToken` (creates the project on the gallery) or an
+			 * existing `pgt_` project `token` (reuses it).
+			 */
+			createDeviceProject: {
+				params: {
+					name: string;
+					slug?: string;
+					platformUrl: string;
+					setupToken?: string;
+					token?: string;
+				};
+				response:
+					| {
+							ok: true;
+							slug: string;
+							projectToken: string;
+							restored?: boolean;
+							reused?: boolean;
 					  }
 					| { ok: false; error: string };
 			};
@@ -836,6 +992,8 @@ export type ScenarioRunnerRPC = {
 			 * The view's stepper UI reads these in real time.
 			 */
 			onInitProgress: InstallProgressMessage;
+			/** Pushed once a downloaded update is ready; view shows the restart banner. */
+			onUpdateReady: UpdateReadyMessage;
 		};
 	};
 	webview: {

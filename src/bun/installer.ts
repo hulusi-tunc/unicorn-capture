@@ -27,6 +27,12 @@ export interface InstallPlan {
 	/** Setup token for one-shot project creation, OR existing project token. */
 	setupToken?: string;
 	projectToken?: string;
+	/**
+	 * Signed-in user's Supabase access token. Preferred over setupToken so the
+	 * created project is attributed + assigned to the creator (and thus appears
+	 * in their Capture dashboard). Injected by the runInstaller RPC handler.
+	 */
+	accessToken?: string;
 	/** Detected fingerprint from `fingerprintRepo()`. */
 	fingerprint: RepoFingerprint;
 	/** Toggles from the Plan UI. */

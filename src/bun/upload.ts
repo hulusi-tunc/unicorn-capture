@@ -361,6 +361,33 @@ export function sessionToPlatformManifest(
 		});
 	}
 
+	// Include empty grouping flows that are ANCESTORS of flows with snaps (e.g.
+	// an "ADMIN" flow that only holds sub-flows). They carry no frames but
+	// preserve the nesting — without them the gallery orphans their children to
+	// the top level. Truly-empty leaf flows are still left out.
+	const withSnaps = new Set(grouped.keys());
+	const needContainer = new Set<string>();
+	for (const id of withSnaps) {
+		let pid = flowById.get(id)?.parentFlowId;
+		while (pid && !withSnaps.has(pid) && !needContainer.has(pid)) {
+			needContainer.add(pid);
+			pid = flowById.get(pid)?.parentFlowId;
+		}
+	}
+	for (const cid of needContainer) {
+		if (grouped.has(cid)) continue;
+		const f = flowById.get(cid);
+		if (!f) continue;
+		grouped.set(cid, {
+			id: f.id,
+			name: f.name,
+			parentFlowId: f.parentFlowId,
+			autoRoute: f.autoRoute,
+			position: flowOrder.get(f.id),
+			frames: [],
+		});
+	}
+
 	// Emit groups in the orchestrator's flow order; orphans go at the end.
 	const orderedFlows: PlatformManifest["flows"] = [];
 	for (const f of flows) {
@@ -569,6 +596,15 @@ export async function uploadSession(
 			}
 			bucket.frames.push(it.frame);
 		}
+		// Carry the empty grouping flows into every batch — they have no frames
+		// so they aren't in `items`, but each batch's manifest must include them
+		// for the gallery to persist the full nesting (its flow_tree accumulates
+		// across batches).
+		for (const cf of fullManifest.flows) {
+			if (cf.frames.length === 0 && !flowsInBatch.has(cf.id)) {
+				flowsInBatch.set(cf.id, { ...cf, frames: [] });
+			}
+		}
 		const batchManifest: PlatformManifest = {
 			...fullManifest,
 			flows: [...flowsInBatch.values()],
@@ -712,6 +748,12 @@ async function uploadOne(args: {
 		}
 	}
 
+	// Empty grouping flows arrive with no frames — keep them (they carry the
+	// nesting). Other flows are kept only if at least one frame's bytes are
+	// present; a flow whose frames all went missing-on-disk is dropped.
+	const containerIds = new Set(
+		manifest.flows.filter((f) => f.frames.length === 0).map((f) => f.id),
+	);
 	const filteredManifest: PlatformManifest = {
 		...manifest,
 		flows: manifest.flows
@@ -721,12 +763,10 @@ async function uploadOne(args: {
 					.filter((f) => frameBytes.has(f.image))
 					.map((f) => ({
 						...f,
-						versions: (f.versions ?? []).filter((v) =>
-							versionBytes.has(v.image),
-						),
+						versions: (f.versions ?? []).filter((v) => versionBytes.has(v.image)),
 					})),
 			}))
-			.filter((flow) => flow.frames.length > 0),
+			.filter((flow) => flow.frames.length > 0 || containerIds.has(flow.id)),
 	};
 
 	if (filteredManifest.flows.length === 0) {

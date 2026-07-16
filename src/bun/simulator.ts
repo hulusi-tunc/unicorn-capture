@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 
 export interface SimulatorWindow {
 	x: number;
@@ -72,12 +72,24 @@ export function mirrorSimulator(): MirrorResult {
  * metadata request from the orchestrator — total snap latency ≈
  * max(simctl, ws) instead of simctl + ws.
  */
-export async function captureSimulator(outPath: string): Promise<CaptureResult> {
+export async function captureSimulator(
+	outPath: string,
+	deviceUdid?: string,
+): Promise<CaptureResult> {
 	if (process.platform !== "darwin") {
 		return { ok: false, error: "iOS Simulator capture is macOS-only." };
 	}
+	// `deviceUdid` targets a specific device (e.g. a booted iPad while an
+	// iPhone is also up). Falls back to "booted" — the single-device default.
 	const proc = Bun.spawn({
-		cmd: ["/usr/bin/xcrun", "simctl", "io", "booted", "screenshot", outPath],
+		cmd: [
+			"/usr/bin/xcrun",
+			"simctl",
+			"io",
+			deviceUdid ?? "booted",
+			"screenshot",
+			outPath,
+		],
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -102,6 +114,7 @@ export async function captureSimulator(outPath: string): Promise<CaptureResult> 
 			error: `simctl screenshot failed: ${trimmed || "unknown"}`,
 		};
 	}
+	correctScreenshotOrientation(outPath);
 	return { ok: true, path: outPath };
 }
 
@@ -210,4 +223,168 @@ export function getSimulatorWindow(): SimulatorWindowResult {
 	}
 	const [x, y, width, height] = parts as [number, number, number, number];
 	return { ok: true, rect: { x, y, width, height } };
+}
+
+// ── Device enumeration + boot ────────────────────────────────────────────
+// Powers the device picker: list available iOS simulators (iPhone + iPad),
+// and boot a chosen one. This is what makes bridge-less "snap any booted
+// simulator" work for iPad — and for non-RN apps (Flutter, native) that can
+// never run the JS snap-bridge.
+
+export interface SimDevice {
+	udid: string;
+	name: string;
+	/** "Booted" | "Shutdown" | "Booting" | … (raw simctl state). */
+	state: string;
+	kind: "iphone" | "ipad" | "other";
+	/** Human runtime label, e.g. "iOS 17.2". */
+	runtime: string;
+}
+
+export type ListDevicesResult =
+	| { ok: true; devices: SimDevice[] }
+	| { ok: false; error: string };
+
+export type BootDeviceResult =
+	| { ok: true; alreadyBooted: boolean }
+	| { ok: false; error: string };
+
+function prettyRuntime(runtimeKey: string): string {
+	// "com.apple.CoreSimulator.SimRuntime.iOS-17-2" → "iOS 17.2"
+	const m = runtimeKey.match(/SimRuntime\.([A-Za-z]+)-([\d-]+)$/);
+	if (!m) return runtimeKey;
+	return `${m[1]} ${m[2]!.replace(/-/g, ".")}`;
+}
+
+/**
+ * Enumerate available iOS Simulator devices via
+ * `xcrun simctl list devices available --json`, flattened across runtimes
+ * and classified iPhone vs iPad. Booted devices sort first, then by name.
+ */
+export function listDevices(): ListDevicesResult {
+	if (process.platform !== "darwin") {
+		return { ok: false, error: "iOS Simulator is macOS-only." };
+	}
+	const r = spawnSync(
+		"/usr/bin/xcrun",
+		["simctl", "list", "devices", "available", "--json"],
+		{ stdio: "pipe", maxBuffer: 16 * 1024 * 1024 },
+	);
+	if (r.status !== 0) {
+		const stderr = r.stderr?.toString().trim() ?? "";
+		if (stderr.includes("xcrun: error")) {
+			return {
+				ok: false,
+				error: `Xcode command-line tools missing or misconfigured: ${stderr}`,
+			};
+		}
+		return { ok: false, error: `simctl list failed: ${stderr || "unknown"}` };
+	}
+	let parsed: { devices?: Record<string, Array<Record<string, unknown>>> };
+	try {
+		parsed = JSON.parse(r.stdout.toString());
+	} catch (e) {
+		return {
+			ok: false,
+			error: `Failed to parse simctl output: ${(e as Error).message}`,
+		};
+	}
+	const devices: SimDevice[] = [];
+	for (const [runtimeKey, list] of Object.entries(parsed.devices ?? {})) {
+		// Only iOS runtimes — skip watchOS / tvOS / visionOS.
+		if (!/iOS/i.test(runtimeKey)) continue;
+		const runtime = prettyRuntime(runtimeKey);
+		for (const d of list) {
+			const udid = typeof d.udid === "string" ? d.udid : "";
+			const name = typeof d.name === "string" ? d.name : "";
+			if (!udid || !name) continue;
+			const state = typeof d.state === "string" ? d.state : "Shutdown";
+			const typeId =
+				typeof d.deviceTypeIdentifier === "string"
+					? d.deviceTypeIdentifier
+					: "";
+			const kind: SimDevice["kind"] = /ipad/i.test(name) || /iPad/i.test(typeId)
+				? "ipad"
+				: /iphone/i.test(name) || /iPhone/i.test(typeId)
+					? "iphone"
+					: "other";
+			devices.push({ udid, name, state, kind, runtime });
+		}
+	}
+	devices.sort((a, b) => {
+		const aBooted = a.state === "Booted" ? 0 : 1;
+		const bBooted = b.state === "Booted" ? 0 : 1;
+		if (aBooted !== bBooted) return aBooted - bBooted;
+		return a.name.localeCompare(b.name);
+	});
+	return { ok: true, devices };
+}
+
+/**
+ * Boot a specific simulator device by udid, then open Simulator.app so its
+ * window is visible (for the live mirror). Booting an already-booted device
+ * is treated as success — that's the state we want.
+ */
+export function bootDevice(udid: string): BootDeviceResult {
+	if (process.platform !== "darwin") {
+		return { ok: false, error: "iOS Simulator is macOS-only." };
+	}
+	if (!udid) return { ok: false, error: "No device udid provided." };
+	const boot = spawnSync("/usr/bin/xcrun", ["simctl", "boot", udid], {
+		stdio: "pipe",
+	});
+	let alreadyBooted = false;
+	if (boot.status !== 0) {
+		const stderr = boot.stderr?.toString().trim() ?? "";
+		if (/current state: Booted/i.test(stderr)) {
+			alreadyBooted = true;
+		} else {
+			return { ok: false, error: `simctl boot failed: ${stderr || "unknown"}` };
+		}
+	}
+	// Bring the Simulator window up so the live mirror has something to read.
+	spawnSync("/usr/bin/open", ["-a", "Simulator"], { stdio: "ignore" });
+	return { ok: true, alreadyBooted };
+}
+
+// ── Orientation correction ───────────────────────────────────────────────
+
+/** Read PNG pixel dimensions straight from the IHDR chunk — no decode, no deps. */
+function readPngSize(path: string): { w: number; h: number } | null {
+	try {
+		const fd = openSync(path, "r");
+		const buf = Buffer.alloc(24);
+		readSync(fd, buf, 0, 24, 0);
+		closeSync(fd);
+		// 8-byte PNG signature, 4-byte chunk length, "IHDR", 4-byte W, 4-byte H.
+		if (buf.toString("ascii", 12, 16) !== "IHDR") return null;
+		return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * `xcrun simctl io screenshot` writes the device's native (portrait)
+ * framebuffer even when the simulator is rotated to landscape, leaving the UI
+ * rotated 90° inside a portrait PNG. Detect that by comparing the shot's
+ * orientation to the live Simulator window, and rotate the file upright so it's
+ * stored — and later framed + uploaded — in the orientation the user sees.
+ *
+ * Direction: simctl's landscape capture comes out rotated 90° CCW, so a
+ * clockwise rotation (`sips -r 90`) puts it upright for the common
+ * (rotate-right) landscape. No-ops when the window orientation can't be read
+ * (e.g. Accessibility permission not granted) so capture still succeeds, just
+ * uncorrected.
+ */
+function correctScreenshotOrientation(outPath: string): void {
+	if (process.platform !== "darwin") return;
+	const size = readPngSize(outPath);
+	if (!size) return;
+	const win = getSimulatorWindow();
+	if (!win.ok) return;
+	const shotLandscape = size.w > size.h;
+	const winLandscape = win.rect.width > win.rect.height;
+	if (shotLandscape === winLandscape) return;
+	spawnSync("/usr/bin/sips", ["-r", "90", outPath], { stdio: "ignore" });
 }

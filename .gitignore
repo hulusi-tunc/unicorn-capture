@@ -7,6 +7,9 @@ dist/
 artifacts/
 artifacts-*-final/
 
+# Vercel release host (staging dir for `vercel deploy`: link state + copied artifacts)
+release-host/
+
 # Runtime output
 screenshots-output/
 tests/.out/

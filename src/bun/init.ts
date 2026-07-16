@@ -65,6 +65,13 @@ export interface InitInputs {
 	platformUrl: string;
 	setupToken?: string;
 	token?: string;
+	/**
+	 * Signed-in user's Supabase access token. Preferred over setupToken when
+	 * creating the project so the gallery attributes it (created_by) AND assigns
+	 * it to the creator (project_members) — that's what makes it show up in the
+	 * creator's Capture dashboard.
+	 */
+	accessToken?: string;
 }
 
 export interface InitStep {
@@ -677,7 +684,10 @@ export function removeCaptureProject(slug: string): boolean {
 // ── Platform call ──────────────────────────────────────────────────────────
 export async function createProjectOnPlatform(args: {
 	url: string;
-	setupToken: string;
+	/** Shared setup token (legacy/CI). Used only when no accessToken is given. */
+	setupToken?: string;
+	/** Signed-in user's access token — preferred, so the creator is assigned. */
+	accessToken?: string;
 	slug: string;
 	name: string;
 	platform: string;
@@ -687,14 +697,24 @@ export async function createProjectOnPlatform(args: {
 	name: string;
 	platform: string;
 	projectToken: string;
+	/** Present when the gallery reactivated a previously-archived project. */
+	restored?: boolean;
+	/** Present when an existing project with this slug was returned as-is. */
+	reused?: boolean;
 }> {
+	const bearer = args.accessToken?.trim() || args.setupToken?.trim();
+	if (!bearer) {
+		throw new Error(
+			"You must be signed in (or provide a setup token) to create a project.",
+		);
+	}
 	let resp: Response;
 	try {
 		resp = await fetch(`${args.url.replace(/\/$/, "")}/api/projects`, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				authorization: `Bearer ${args.setupToken}`,
+				authorization: `Bearer ${bearer}`,
 			},
 			body: JSON.stringify({
 				slug: args.slug,
@@ -720,6 +740,53 @@ export async function createProjectOnPlatform(args: {
 		throw new Error(`${resp.status} ${json.error ?? text}`);
 	}
 	return json;
+}
+
+/**
+ * Resolve which gallery project a `pgt_` project token belongs to by pulling
+ * the capture manifest (the read endpoint authenticated by the token alone).
+ * Lets a reused token register under its REAL slug instead of a user-typed
+ * one — the gallery attributes uploads by token, so a mismatched local slug
+ * would mislabel the project and break archive sync. Also validates the token
+ * up front. Throws on an unreachable platform or an invalid/expired token.
+ */
+export async function resolveProjectByToken(args: {
+	url: string;
+	token: string;
+}): Promise<{ slug: string; platform: string }> {
+	let resp: Response;
+	try {
+		resp = await fetch(`${args.url.replace(/\/$/, "")}/api/captures/manifest`, {
+			method: "GET",
+			headers: { authorization: `Bearer ${args.token}` },
+		});
+	} catch (err) {
+		throw new Error(
+			`Could not reach platform at ${args.url}: ${(err as Error).message}`,
+		);
+	}
+	const text = await resp.text();
+	if (!resp.ok) {
+		let msg = text;
+		try {
+			msg = (JSON.parse(text) as { error?: string }).error ?? text;
+		} catch {}
+		throw new Error(
+			resp.status === 401 || resp.status === 403
+				? "That project token was rejected by the gallery — check it's a valid pgt_ token."
+				: `Couldn't verify the token (${resp.status}): ${msg.slice(0, 200)}`,
+		);
+	}
+	let json: { app?: { slug?: string; platform?: string } };
+	try {
+		json = JSON.parse(text);
+	} catch {
+		throw new Error(`Platform returned non-JSON (${resp.status}).`);
+	}
+	if (!json.app?.slug) {
+		throw new Error("Gallery response was missing the project slug.");
+	}
+	return { slug: json.app.slug, platform: json.app.platform ?? "ios" };
 }
 
 // ── End-to-end driver ──────────────────────────────────────────────────────
@@ -775,10 +842,10 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 	let projectToken = input.token?.trim();
 	let projectId: string | undefined;
 	if (!projectToken) {
-		if (!input.setupToken) {
+		if (!input.setupToken && !input.accessToken) {
 			return {
 				ok: false,
-				error: "Either token or setupToken is required.",
+				error: "Sign in (or provide a token / setup token) to create a project.",
 				steps,
 			};
 		}
@@ -786,6 +853,7 @@ export async function initProject(input: InitInputs): Promise<InitOutcome> {
 			const r = await createProjectOnPlatform({
 				url: platformUrl,
 				setupToken: input.setupToken,
+				accessToken: input.accessToken,
 				slug,
 				name,
 				platform: input.platform,

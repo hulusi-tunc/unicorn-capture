@@ -307,6 +307,7 @@ export function openWizardV2(deps: WizardDeps): void {
 				<dt>Workspace</dt>        <dd>${escapeHtml(fp.workspaceRoot)}${fp.isMonorepo ? " (monorepo)" : ""}</dd>
 				<dt>RN app</dt>           <dd>${escapeHtml(pickedLabel)}</dd>
 				<dt>Layout flavor</dt>    <dd>${fp.rnLayout}</dd>
+				<dt>Navigation</dt>       <dd>${fp.navLibrary}</dd>
 				<dt>Package manager</dt>  <dd>${fp.packageManager}</dd>
 				<dt>snap-bridge</dt>      <dd>${escapeHtml(bridgeLabel)}</dd>
 				<dt>view-shot</dt>        <dd>${fp.viewShot.installed ? `installed${fp.viewShot.podsInstalled ? " (+ pods)" : " (pods not run)"}` : "missing"}</dd>
@@ -448,14 +449,10 @@ export function openWizardV2(deps: WizardDeps): void {
 			deps.log("Slug is required", "error");
 			return null;
 		}
-		if (!platformUrl) {
-			deps.log("Platform URL is required", "error");
-			return null;
-		}
-		if (!tokenField) {
-			deps.log("Setup token (or pgt_ project token) is required", "error");
-			return null;
-		}
+		// Platform URL + token are no longer required from the user: the bun side
+		// defaults the gallery URL and authenticates the create with the signed-in
+		// user's session, which also assigns the project to them. The fields stay
+		// available for advanced use (custom gallery URL, reusing a pgt_ token).
 
 		const checked = (id: string): boolean =>
 			Boolean((sec.querySelector<HTMLInputElement>(`#wiz2-opt-${id}`))?.checked);

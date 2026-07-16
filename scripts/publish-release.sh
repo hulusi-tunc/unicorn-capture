@@ -12,6 +12,9 @@
 #      AWS_* env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
 #      optional AWS_ENDPOINT_URL_S3 for non-AWS).
 #
+#   3. PUBLISH_VERCEL=1    — static deploy to a Vercel project via the
+#      `vercel` CLI. One-time `cd release-host && vercel link` first.
+#
 # Pick one and uncomment the matching block below. The script copies
 # everything in artifacts/ — DMG + .app.tar.zst + update.json — to
 # the same path layout the running app expects from `release.baseUrl`.
@@ -57,6 +60,34 @@ if [ -n "${PUBLISH_S3_BUCKET:-}" ]; then
     --acl public-read \
     --cache-control "max-age=300, public"
   echo "✓ Published via S3"
+  exit 0
+fi
+
+# ── Option 3: Vercel static deploy (uses the `vercel` CLI) ──
+# One-time setup: `cd release-host && vercel link` to create/link the project,
+# then copy its production URL into ELECTROBUN_RELEASE_BASE_URL in .env.build.
+# After that this block redeploys the artifacts on every release.
+if [ "${PUBLISH_VERCEL:-}" = "1" ]; then
+  if ! command -v vercel &> /dev/null; then
+    echo "✗ vercel CLI not found — run: bun add -g vercel"
+    exit 1
+  fi
+  HOST_DIR="release-host"
+  mkdir -p "$HOST_DIR"
+  # Cache policy: the *-update.json manifests must always be re-fetched so the
+  # app notices new versions immediately; the heavy binaries can cache briefly.
+  cat > "$HOST_DIR/vercel.json" <<'JSON'
+{
+  "headers": [
+    { "source": "/(.*)-update.json", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/(.*).(dmg|zst)",   "headers": [{ "key": "Cache-Control", "value": "public, max-age=300" }] }
+  ]
+}
+JSON
+  cp "$ARTIFACTS_DIR"/* "$HOST_DIR/"
+  echo "  → vercel deploy --prod (from $HOST_DIR/)"
+  ( cd "$HOST_DIR" && vercel deploy --prod --yes ${VERCEL_TOKEN:+--token "$VERCEL_TOKEN"} )
+  echo "✓ Published via Vercel"
   exit 0
 fi
 

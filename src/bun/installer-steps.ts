@@ -45,12 +45,15 @@ const platformRegisterStep: Step = {
 			ctx.bag.projectToken = ctx.plan.projectToken;
 			return;
 		}
-		if (!ctx.plan.setupToken) {
-			throw new Error("Either token or setupToken is required");
+		if (!ctx.plan.setupToken && !ctx.plan.accessToken) {
+			throw new Error(
+				"Sign in (or provide a token / setup token) to register the project.",
+			);
 		}
 		const r = await createProjectOnPlatform({
 			url: ctx.plan.platformUrl,
 			setupToken: ctx.plan.setupToken,
+			accessToken: ctx.plan.accessToken,
 			slug: ctx.plan.slug,
 			name: ctx.plan.name ?? ctx.plan.slug,
 			platform: ctx.plan.platform,
@@ -329,9 +332,13 @@ const patchLayoutStep: Step = {
 	async run(ctx) {
 		const fp = ctx.plan.fingerprint;
 		if (!fp.layoutFile.path) {
+			const hint =
+				fp.navLibrary === "react-navigation"
+					? " This is a react-navigation app: call installSnapBridge(...) once at your app root and add useSnapAutoSync(navigationRef) from @unicorn-studio/snap-bridge/react-navigation."
+					: " Call installSnapBridge(...) yourself at your app entry point.";
 			ctx.emit(
 				"progress",
-				"No root _layout file detected — skipping auto-wire (you'll need to call installSnapBridge yourself).",
+				`No root _layout file detected — skipping auto-wire.${hint}`,
 			);
 			return;
 		}
@@ -383,6 +390,26 @@ const runSnapFlowsScanStep: Step = {
 	async run(ctx) {
 		const fp = ctx.plan.fingerprint;
 		const rnAppDir = fp.picked!.rnAppDir;
+
+		// snap-flows-scan walks an Expo Router `app/` route tree. A
+		// react-navigation or home-rolled app has no such tree, so the scan
+		// would exit 1 with "Could not find an Expo Router `app/` directory".
+		// Skip it with a clear next-step instead of failing the whole install:
+		// the react-navigation adapter (useSnapAutoSync) still feeds Capture
+		// live routes, and snap-flows.ts can be authored by hand or grown from
+		// captures via Improve.
+		if (fp.navLibrary !== "expo-router") {
+			const how =
+				fp.navLibrary === "react-navigation"
+					? "this app uses react-navigation — wire `useSnapAutoSync(navigationRef)` from `@unicorn-studio/snap-bridge/react-navigation`"
+					: "this app has no Expo Router `app/` tree — push routes with `setSnapState` from your navigator";
+			ctx.emit(
+				"progress",
+				`Skipping snap-flows-scan: ${how}. Routes still flow to Capture live; author snap-flows.ts by hand or grow it from captures via Improve.`,
+			);
+			return;
+		}
+
 		const localBin = join(rnAppDir, "node_modules", ".bin", "snap-flows-scan");
 		const rootBin = join(
 			fp.workspaceRoot,

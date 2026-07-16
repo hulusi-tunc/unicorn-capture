@@ -7,9 +7,14 @@ import {
 	ApplicationMenu,
 	BrowserView,
 	BrowserWindow,
+	Updater,
 	Utils,
 } from "electrobun/bun";
-import type { RnSnapInfo, ScenarioRunnerRPC } from "../lib/rpc";
+import type {
+	RnSnapInfo,
+	ScenarioRunnerRPC,
+	UpdateReadyMessage,
+} from "../lib/rpc";
 import { validateDeviceConfig, validateScenario } from "../lib/schemas";
 import { probeExpoDevServer, probeSimulatorBooted, runDoctor } from "./doctor";
 import {
@@ -21,7 +26,18 @@ import {
 	loadCaptureProjects,
 	registerWithCapture,
 	removeCaptureProject,
+	resolveProjectByToken,
 } from "./init";
+import {
+	type AssignedProject,
+	type CaptureSession,
+	clearSession,
+	getValidAccessToken,
+	listAssignedProjects as authListAssignedProjects,
+	loadSession,
+	signIn as authSignIn,
+} from "./auth";
+import { GALLERY_URL } from "./config";
 import {
 	type InstallOutcome,
 	type InstallPlan,
@@ -30,7 +46,7 @@ import {
 import { assembleCoreSteps } from "./installer-steps";
 import { fingerprintRepo } from "./repo-fingerprint";
 import { captureRect } from "./screencapture";
-import { forwardTap, mirrorSimulator } from "./simulator";
+import { bootDevice, forwardTap, listDevices, mirrorSimulator } from "./simulator";
 import {
 	buildImprovePrompt,
 	buildWebImprovePrompt,
@@ -815,10 +831,90 @@ function freeCurrentSource(): void {
 	}
 }
 
+// Holds an update that finished downloading, so the view can pull it via
+// `getPendingUpdate` if it wasn't yet listening when the one-shot push fired.
+let pendingUpdate: UpdateReadyMessage | null = null;
+
+/** Strip tokens from a session before it crosses the RPC bridge to the view. */
+function toSessionInfo(s: CaptureSession): {
+	userId: string;
+	email: string;
+	role: "agency" | "customer";
+	isOwner: boolean;
+	signedInAt: string;
+} {
+	return {
+		userId: s.userId,
+		email: s.email,
+		role: s.role,
+		isOwner: s.isOwner,
+		signedInAt: s.signedInAt,
+	};
+}
+
+/**
+ * Upsert the gallery's assigned-project list into the local registry and return
+ * the assigned set (which becomes the dashboard registry — so members only SEE
+ * assigned projects, the owner sees all). Local fields the gallery doesn't track
+ * (repoPath, rnAppDir, baseUrl) are preserved via the merge.
+ *
+ * We deliberately do NOT prune projects.json down to the assigned set:
+ * projects.json stays a non-destructive local cache. An earlier version pruned
+ * here, which silently deleted a member's locally-onboarded project (and its
+ * repoPath/rnAppDir) in the window before it had been assigned server-side —
+ * e.g. right after the mobile install wizard finished. Scoping is enforced by
+ * what we RETURN, not by deleting on-disk wiring.
+ */
+function reconcileAssignedProjects(
+	projects: AssignedProject[],
+): CaptureProjectEntry[] {
+	const uploadUrl = `${GALLERY_URL}/api/captures/upload`;
+	const existing = loadCaptureProjects();
+	const existingBySlug = new Map(existing.map((e) => [e.slug, e]));
+
+	const assigned: CaptureProjectEntry[] = [];
+	for (const p of projects) {
+		if (!p.projectToken) continue; // can't push/pull without a token
+		const prev = existingBySlug.get(p.slug);
+		const entry: CaptureProjectEntry = {
+			...prev,
+			slug: p.slug,
+			name: p.name,
+			platform: p.platform,
+			projectToken: p.projectToken,
+			uploadUrl,
+			registeredAt: prev?.registeredAt ?? new Date().toISOString(),
+		};
+		registerWithCapture(entry);
+		assigned.push(entry);
+	}
+
+	return assigned;
+}
+
 const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 	maxRequestTime: 600000,
 	handlers: {
 		requests: {
+			applyUpdate: async () => {
+				try {
+					// Manual API: extracts the new bundle, swaps the .app,
+					// relaunches, then quit()s — on REAL success this never
+					// returns (the process exits). So reaching the line after it
+					// means it did NOT apply (e.g. a newer build was published
+					// mid-session, so the downloaded tar no longer matches the
+					// latest hash). Report that as failure so the view re-enables
+					// the button instead of hanging on "Restarting…".
+					await Updater.applyUpdate();
+					return {
+						ok: false,
+						error: "Update is no longer ready — relaunch to retry.",
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			getPendingUpdate: async () => ({ update: pendingUpdate }),
 			resolveSource: async (input) => {
 				freeCurrentSource();
 				const r = await resolveSource(input);
@@ -1263,12 +1359,17 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 			runInstaller: async ({ plan: planInput }) => {
 				// Fingerprint comes over the wire; re-validate that the picked
 				// rnAppDir still exists on disk before we touch anything.
+				// Prefer the signed-in user's token so the new project is attributed
+				// + assigned to them (and thus appears in their dashboard); default
+				// the gallery URL when the wizard field was left blank.
+				const accessToken = (await getValidAccessToken()) ?? undefined;
 				const installPlan: InstallPlan = {
 					slug: planInput.slug,
 					name: planInput.name,
 					platform: planInput.platform,
-					platformUrl: planInput.platformUrl,
+					platformUrl: planInput.platformUrl?.trim() || GALLERY_URL,
 					setupToken: planInput.setupToken,
+					accessToken,
 					projectToken: planInput.projectToken,
 					fingerprint: planInput.fingerprint as InstallPlan["fingerprint"],
 					options: planInput.options,
@@ -1346,6 +1447,28 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				} catch (err) {
 					return { ok: false, error: (err as Error).message };
 				}
+			},
+			signIn: async ({ email, password }) => {
+				const res = await authSignIn(email, password);
+				if (!res.ok) return { ok: false, error: res.error };
+				const projects = reconcileAssignedProjects(res.projects);
+				return { ok: true, session: toSessionInfo(res.session), projects };
+			},
+			signOut: async () => {
+				clearSession();
+				return { ok: true };
+			},
+			getSession: async () => {
+				const s = loadSession();
+				return { session: s ? toSessionInfo(s) : null };
+			},
+			listAssignedProjects: async () => {
+				const res = await authListAssignedProjects();
+				if (!res.ok) {
+					return { ok: false, error: res.error, needsSignIn: res.needsSignIn };
+				}
+				const projects = reconcileAssignedProjects(res.projects);
+				return { ok: true, user: res.user, projects };
 			},
 			listProjects: async () => {
 				// Sync archive status with platform on every list call. If the
@@ -1509,8 +1632,37 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				return { ok: true };
 			},
 			bootSimulator: async () => bootSimulator(),
+			listDevices: async () => listDevices(),
+			bootDevice: async ({ udid }) => bootDevice(udid),
+			deviceSnap: async ({ projectSlug, deviceUdid, displayName, forceFlowId }) => {
+				// Bridge-less snap: NO clientCount gate. Captures whatever is on
+				// the booted (or specified) simulator via simctl and files it
+				// under the selected project — works for Flutter / native / iPad
+				// and any RN app whose bridge isn't connected.
+				const orch = await ensureOrchestrator();
+				const r = await orch.recordDeviceSnap({
+					projectId: projectSlug,
+					deviceUdid,
+					displayName,
+					flowId: forceFlowId,
+				});
+				if (!r.ok) return { ok: false, error: r.error };
+				return {
+					ok: true,
+					snap: snapToInfo(r.record, orch.outDir),
+					placement: r.placement,
+					captureMethod: "simctl" as const,
+				};
+			},
 			initProject: async (input) => {
-				const result = await initProject(input);
+				// Prefer the signed-in user's token so the new project is attributed
+				// + assigned to them; fall back to the gallery URL if none was typed.
+				const accessToken = (await getValidAccessToken()) ?? undefined;
+				const result = await initProject({
+					...input,
+					platformUrl: input.platformUrl?.trim() || GALLERY_URL,
+					accessToken,
+				});
 				if (!result.ok) {
 					return { ok: false, error: result.error, steps: result.steps };
 				}
@@ -1533,7 +1685,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 				slug?: string;
 				baseUrl: string;
 				platformUrl: string;
-				setupToken: string;
+				setupToken?: string;
 				seedFlows?: Array<{ id: string; name: string; routes: string[] }>;
 			}) => {
 				const { name, slug, baseUrl, platformUrl, setupToken, seedFlows } =
@@ -1564,15 +1716,18 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						error: "Slug must be lowercase kebab-case (a–z, 0–9, hyphen).",
 					};
 				}
+				const galleryUrl = platformUrl?.trim() || GALLERY_URL;
+				const accessToken = (await getValidAccessToken()) ?? undefined;
 				try {
 					const platform = await createProjectOnPlatform({
-						url: platformUrl,
+						url: galleryUrl,
 						setupToken,
+						accessToken,
 						slug: computedSlug,
 						name: trimmedName,
 						platform: "web",
 					});
-					const uploadUrl = `${platformUrl.replace(/\/$/, "")}/api/captures/upload`;
+					const uploadUrl = `${galleryUrl.replace(/\/$/, "")}/api/captures/upload`;
 					registerWithCapture({
 						slug: platform.slug,
 						name: platform.name,
@@ -1610,6 +1765,118 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						restored: platform.restored,
 						reused: platform.reused,
 						seededFlows,
+					};
+				} catch (err) {
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+			createDeviceProject: async (input: {
+				name: string;
+				slug?: string;
+				platformUrl: string;
+				setupToken?: string;
+				token?: string;
+			}) => {
+				// No-repo, no-bridge project for simulator capture (Flutter,
+				// native iOS, iPad, RN-without-bridge). Mirrors createWebProject
+				// but drops baseUrl + seedFlows and registers with NO repoPath/
+				// rnAppDir so the repo-only paths (doctor, flows-scan, expo) are
+				// never invoked for it.
+				const { name, slug, platformUrl } = input;
+				const slugify = (s: string): string =>
+					s
+						.toLowerCase()
+						.replace(/[^a-z0-9]+/g, "-")
+						.replace(/^-|-$/g, "")
+						.slice(0, 48);
+				const trimmedName = name.trim();
+				const trimmedPlatformUrl = (platformUrl.trim() || GALLERY_URL).replace(
+					/\/$/,
+					"",
+				);
+				const suppliedToken = input.token?.trim();
+				const setupToken = input.setupToken?.trim();
+				const accessToken = (await getValidAccessToken()) ?? undefined;
+				if (!trimmedName) return { ok: false, error: "Name is required." };
+				try {
+					new URL(trimmedPlatformUrl);
+				} catch {
+					return { ok: false, error: "Gallery URL is not a valid URL." };
+				}
+				if (!suppliedToken && !setupToken && !accessToken) {
+					return {
+						ok: false,
+						error:
+							"Sign in, or provide a setup token or an existing project token (pgt_…).",
+					};
+				}
+				const computedSlug =
+					slug?.trim() ||
+					slugify(trimmedName) ||
+					`device-${Date.now().toString(36).slice(-6)}`;
+				if (!/^[a-z0-9][a-z0-9-]*$/.test(computedSlug)) {
+					return {
+						ok: false,
+						error: "Slug must be lowercase kebab-case (a–z, 0–9, hyphen).",
+					};
+				}
+				const uploadUrl = `${trimmedPlatformUrl}/api/captures/upload`;
+				try {
+					// Two ways in: reuse an existing pgt_ project token directly,
+					// or create a fresh project on the gallery with a setup token.
+					if (suppliedToken) {
+						if (!suppliedToken.startsWith("pgt_")) {
+							return {
+								ok: false,
+								error: 'A project token should start with "pgt_".',
+							};
+						}
+						// Resolve the REAL project this token belongs to instead
+						// of trusting the typed slug: the gallery attributes
+						// uploads by token, so a mismatched local slug would
+						// mislabel the project and break archive sync. Also
+						// validates the token up front (throws on 401/expired).
+						const resolved = await resolveProjectByToken({
+							url: trimmedPlatformUrl,
+							token: suppliedToken,
+						});
+						registerWithCapture({
+							slug: resolved.slug,
+							name: trimmedName,
+							platform: resolved.platform,
+							projectToken: suppliedToken,
+							uploadUrl,
+							registeredAt: new Date().toISOString(),
+						});
+						return {
+							ok: true,
+							slug: resolved.slug,
+							projectToken: suppliedToken,
+							reused: true,
+						};
+					}
+					const platform = await createProjectOnPlatform({
+						url: trimmedPlatformUrl,
+						setupToken,
+						accessToken,
+						slug: computedSlug,
+						name: trimmedName,
+						platform: "ios",
+					});
+					registerWithCapture({
+						slug: platform.slug,
+						name: platform.name,
+						platform: "ios",
+						projectToken: platform.projectToken,
+						uploadUrl,
+						registeredAt: new Date().toISOString(),
+					});
+					return {
+						ok: true,
+						slug: platform.slug,
+						projectToken: platform.projectToken,
+						restored: platform.restored,
+						reused: platform.reused,
 					};
 				} catch (err) {
 					return { ok: false, error: (err as Error).message };
@@ -1853,5 +2120,52 @@ try {
 } catch (e: any) {
 	dbg(`BrowserWindow FAILED: ${e?.stack || e}`);
 }
+
+// ── Auto-update (prompt-to-restart) ──────────────────────────────────────
+// On launch only: check → download in the background → push a "ready" event
+// so the view can show a non-blocking "Restart to update" banner. The actual
+// apply+relaunch happens when the user clicks it (applyUpdate rpc handler).
+// The Updater is a manual API — nothing self-triggers — so this is the wiring.
+// Dev-gated: `electrobun dev` ships version.json {channel:"dev", baseUrl:""},
+// and an unconfigured build has an empty baseUrl; both skip cleanly.
+async function maybeAutoUpdate(): Promise<void> {
+	try {
+		const local = await Updater.getLocalInfo();
+		if (local.channel === "dev" || !local.baseUrl) {
+			dbg(
+				`updater: skip (channel=${local.channel || "<empty>"} baseUrl=${local.baseUrl || "<empty>"})`,
+			);
+			return;
+		}
+		const info = await Updater.checkForUpdate();
+		if (info.error) {
+			dbg(`updater: check error: ${info.error}`);
+			return;
+		}
+		if (!info.updateAvailable) {
+			dbg("updater: up to date");
+			return;
+		}
+		dbg(`updater: downloading ${info.hash?.slice(0, 8)}…`);
+		await Updater.downloadUpdate();
+		if (Updater.updateInfo()?.updateReady) {
+			// Retain it so a view that wasn't listening yet can pull it via
+			// getPendingUpdate; the push below is best-effort on top of that.
+			pendingUpdate = { version: info.version, hash: info.hash };
+			(
+				rpc.send as unknown as {
+					onUpdateReady: (m: UpdateReadyMessage) => void;
+				}
+			).onUpdateReady(pendingUpdate);
+			dbg("updater: download complete — restart banner pushed");
+		} else {
+			dbg("updater: download did not complete (no updateReady)");
+		}
+	} catch (err) {
+		// Never let an update check crash or block launch.
+		dbg(`updater error: ${(err as Error).message}`);
+	}
+}
+void maybeAutoUpdate();
 
 process.on("exit", () => freeCurrentSource());

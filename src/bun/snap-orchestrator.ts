@@ -402,6 +402,35 @@ export interface SnapOrchestrator {
 		};
 	}>;
 	/**
+	 * Bridge-less capture: take a plain `simctl` screenshot of a booted
+	 * simulator and append it as a frame — no snap-bridge required. This is
+	 * the universal path that works for ANY app on the simulator (Flutter,
+	 * native iOS, iPad, or an RN app whose bridge isn't installed/connected).
+	 * Each call appends a fresh card (no slot-replace). `deviceUdid` targets a
+	 * specific device; omit for the single booted one.
+	 */
+	recordDeviceSnap(opts: {
+		projectId: string;
+		deviceUdid?: string;
+		/** Override the auto-generated "Screen N" name. */
+		displayName?: string;
+		/** Place into this flow instead of the default "Captures" bucket. */
+		flowId?: string;
+	}): Promise<
+		| {
+				ok: true;
+				record: SnapRecord;
+				route: string;
+				placement: {
+					flowId: string;
+					flowName: string;
+					screenName?: string;
+					kind: "declared-match" | "auto-existing" | "auto-new";
+				};
+		  }
+		| { ok: false; error: string }
+	>;
+	/**
 	 * Apply a Claude-generated flow grouping. Each input flow gets
 	 * created (or renamed if id collides with an existing project flow)
 	 * and the snaps for the listed routes are moved into it. Existing
@@ -1475,6 +1504,117 @@ export async function createSnapOrchestrator(
 		};
 	}
 
+	/**
+	 * See the interface doc. Mirrors `recordWebSnap`'s no-bridge append but
+	 * sources the image from `simctl` instead of a caller-supplied PNG. All
+	 * device snaps land in a per-project "Captures" bucket unless `flowId`
+	 * pins them elsewhere; each gets a unique frame id via `sequence`.
+	 */
+	async function recordDeviceSnap(opts: {
+		projectId: string;
+		deviceUdid?: string;
+		displayName?: string;
+		flowId?: string;
+	}): Promise<
+		| {
+				ok: true;
+				record: SnapRecord;
+				route: string;
+				placement: {
+					flowId: string;
+					flowName: string;
+					screenName?: string;
+					kind: "declared-match" | "auto-existing" | "auto-new";
+				};
+		  }
+		| { ok: false; error: string }
+	> {
+		sequence += 1;
+		const seqStr = String(sequence).padStart(3, "0");
+		const tmpAbs = join(
+			outDir,
+			"screenshots",
+			sessionId,
+			`.tmp-${seqStr}-${Date.now()}.png`,
+		);
+		await mkdir(join(outDir, "screenshots", sessionId), { recursive: true });
+		const cap = await captureSimulator(tmpAbs, opts.deviceUdid);
+		if (!cap.ok) {
+			sequence -= 1;
+			return { ok: false, error: cap.error };
+		}
+		// No bridge → no route/state. Park every device snap under one stable
+		// "/captures" slot so they cluster into a single "Captures" flow; the
+		// per-snap `sequence` still yields a unique frame id on upload.
+		const route = "/captures";
+		const stateHash = "default";
+		const filename = `${seqStr}-${sanitize(route)}-${sanitize(stateHash)}.png`;
+		const imageRel = join("screenshots", sessionId, filename);
+		const imageAbs = join(outDir, imageRel);
+		try {
+			await rename(tmpAbs, imageAbs);
+		} catch {
+			// Cross-device rename can fail — fall back to copy+unlink.
+			const bytes = await readFile(tmpAbs);
+			await writeFile(imageAbs, bytes);
+			try {
+				await unlink(tmpAbs);
+			} catch {}
+		}
+		// Explicit flow when the caller pinned one (and it exists for this
+		// project), else the auto-derived "Captures" bucket.
+		let placed: ReturnType<typeof ensureAutoFlowWithPlacement>;
+		if (opts.flowId) {
+			const target = manifest.flows.find(
+				(f) => f.id === opts.flowId && f.projectId === opts.projectId,
+			);
+			placed = target
+				? { flow: target, screenName: undefined, kind: "auto-existing" }
+				: ensureAutoFlowWithPlacement(route, opts.projectId);
+		} else {
+			placed = ensureAutoFlowWithPlacement(route, opts.projectId);
+		}
+		// Auto-name "Screen N" from the count already parked in this flow for
+		// this project, so the gallery shows Screen 1, Screen 2, … in order.
+		let displayName = opts.displayName?.trim();
+		if (!displayName) {
+			const priorInFlow = listAllSnaps().filter(
+				(s) => s.projectId === opts.projectId && s.flowId === placed.flow.id,
+			).length;
+			displayName = `Screen ${priorInFlow + 1}`;
+		}
+		const capturedAt = new Date().toISOString();
+		const record: SnapRecord = {
+			projectId: opts.projectId,
+			sessionId,
+			sequence,
+			platform: "ios",
+			route,
+			stateHash,
+			image: imageRel,
+			capturedAt,
+			flowId: placed.flow.id,
+			displayName,
+		};
+		session.snaps.push(record);
+		if (!sessionAttached) {
+			manifest.sessions.push(session);
+			sessionAttached = true;
+		}
+		void saveManifest(manifestPath, manifest);
+		return {
+			ok: true,
+			record,
+			route,
+			placement: {
+				flowId: placed.flow.id,
+				flowName: placed.flow.name,
+				screenName: placed.screenName,
+				kind: placed.kind,
+			},
+		};
+	}
+
 	function listAllSnaps(): SnapRecord[] {
 		const all: SnapRecord[] = [];
 		for (const s of manifest.sessions) all.push(...s.snaps);
@@ -2315,6 +2455,7 @@ export async function createSnapOrchestrator(
 		deleteFlow,
 		reorderFlows,
 		recordWebSnap,
+		recordDeviceSnap,
 		applyFlowGrouping,
 		ingestDeclaration,
 		mergeRemoteManifest,

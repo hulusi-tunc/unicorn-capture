@@ -69,6 +69,11 @@ interface AppState {
 	expanded: Set<string>; // step uids that are expanded in editor
 	customViewport: { width: number; height: number } | null;
 	projectKey: string | null;
+	/** Signed-in user (token-free; tokens stay in the bun process). Null = signed out. */
+	session: import("../lib/rpc").AuthSessionInfo | null;
+	/** True once the boot session check has run — gates the sign-in screen so it
+	 *  doesn't flash for an already-signed-in user while hydrating. */
+	authChecked: boolean;
 	rn: {
 		clientCount: number;
 		projects: string[];
@@ -146,6 +151,8 @@ const state = new Store<AppState>({
 	expanded: new Set(),
 	customViewport: null,
 	projectKey: null,
+	session: null,
+	authChecked: false,
 	rn: {
 		clientCount: 0,
 		projects: [],
@@ -241,6 +248,21 @@ function subscribeInstallProgress(
 	};
 }
 
+// `onUpdateReady` is pushed bun→view once an auto-update has finished
+// downloading and is ready to apply. Fanned out to whoever subscribed (the
+// restart banner), mirroring `progressListeners`.
+const updateReadyListeners = new Set<
+	(msg: import("../lib/rpc").UpdateReadyMessage) => void
+>();
+function subscribeUpdateReady(
+	handler: (msg: import("../lib/rpc").UpdateReadyMessage) => void,
+): () => void {
+	updateReadyListeners.add(handler);
+	return () => {
+		updateReadyListeners.delete(handler);
+	};
+}
+
 const rpc = Electroview.defineRPC<ScenarioRunnerRPC>({
 	maxRequestTime: 600000,
 	handlers: {
@@ -252,6 +274,15 @@ const rpc = Electroview.defineRPC<ScenarioRunnerRPC>({
 						l(msg);
 					} catch (err) {
 						console.error("progress listener crashed:", err);
+					}
+				}
+			},
+			onUpdateReady: (msg: import("../lib/rpc").UpdateReadyMessage) => {
+				for (const l of updateReadyListeners) {
+					try {
+						l(msg);
+					} catch (err) {
+						console.error("updateReady listener crashed:", err);
 					}
 				}
 			},
@@ -842,6 +873,29 @@ let initialized = false;
 
 function render(): void {
 	const s = state.get();
+
+	// Auth gate — nothing else mounts until the user is signed in. While the
+	// boot session check is still running (authChecked === false), keep every
+	// root hidden so an already-signed-in user never sees the sign-in form flash.
+	ensureSigninMounted();
+	if (s.session == null) {
+		setSigninVisible(s.authChecked);
+		setDashVisible(false);
+		setRnVisible(false);
+		setWebVisible(false);
+		setAppVisible(false);
+		if (
+			s.authChecked &&
+			signinRefs &&
+			!signinRefs.email.value &&
+			document.activeElement !== signinRefs.email
+		) {
+			signinRefs.email.focus();
+		}
+		return;
+	}
+	setSigninVisible(false);
+
 	const slug = s.rn.selectedProjectSlug;
 	const onDashboard = slug == null;
 	const inProjectType = onDashboard ? null : projectTypeOf(slug);
@@ -2692,6 +2746,77 @@ function dismissChangesBanner(): void {
 	setTimeout(() => node.remove(), 240);
 }
 
+// ─── Auto-update "Restart to update" banner ───
+// Pushed from bun once an update has downloaded. PERSISTENT — unlike the
+// changes banner it has no auto-dismiss timer; prompt-to-restart must wait
+// for the user. De-dupes so a re-check can't stack banners.
+let updateBanner: HTMLDivElement | null = null;
+
+function showUpdateBanner(m: import("../lib/rpc").UpdateReadyMessage): void {
+	if (updateBanner) return;
+	const banner = ce("div", "rn-update-banner");
+	banner.setAttribute("role", "status");
+	banner.setAttribute("aria-live", "polite");
+
+	const icon = ce("span", "rn-changes-icon");
+	icon.textContent = "⬆️";
+
+	const body = ce("div", "rn-changes-body");
+	const heading = ce("div", "rn-changes-heading");
+	heading.textContent = "Update ready";
+	const detail = ce("div", "rn-changes-detail");
+	const label = m.version || (m.hash ? m.hash.slice(0, 8) : "new build");
+	detail.textContent = `Version ${label} downloaded. Restart to apply.`;
+	body.append(heading, detail);
+
+	const restart = ce("button", "btn btn-sm rn-update-restart");
+	restart.type = "button";
+	restart.textContent = "Restart to update";
+	restart.addEventListener("click", async () => {
+		restart.disabled = true;
+		restart.textContent = "Restarting…";
+		// applyUpdate relaunches + quits — on success the app is gone and the
+		// response never arrives, so only the error/no-op branch matters.
+		try {
+			const r = await req.applyUpdate({});
+			if (r && !r.ok) {
+				showToast(`Update failed: ${r.error ?? "unknown error"}`, "error");
+				restart.disabled = false;
+				restart.textContent = "Restart to update";
+			}
+		} catch (err) {
+			showToast(`Update failed: ${(err as Error).message}`, "error");
+			restart.disabled = false;
+			restart.textContent = "Restart to update";
+		}
+	});
+
+	const close = ce("button", "rn-changes-close");
+	close.type = "button";
+	close.setAttribute("aria-label", "Dismiss");
+	close.textContent = "×";
+	close.addEventListener("click", () => {
+		updateBanner?.remove();
+		updateBanner = null;
+	});
+
+	banner.append(icon, body, restart, close);
+	document.body.appendChild(banner);
+	updateBanner = banner;
+}
+
+// Wire the bun push to the banner once, at module load.
+subscribeUpdateReady(showUpdateBanner);
+// The push is fire-once and unbuffered, so if the update finished downloading
+// before this handler was live it'd be lost — pull any pending update now that
+// we're listening. showUpdateBanner de-dupes, so a racing push is harmless.
+req
+	.getPendingUpdate({})
+	.then((r: { update: import("../lib/rpc").UpdateReadyMessage | null }) => {
+		if (r?.update) showUpdateBanner(r.update);
+	})
+	.catch(() => {});
+
 function escapeHtmlSimple(s: string): string {
 	return s
 		.replace(/&/g, "&amp;")
@@ -2852,6 +2977,19 @@ gtbSnapCaret.addEventListener("click", (ev) => {
 });
 gtbSnapGroup.append(gtbSnapBtn, gtbSnapCaret);
 
+// Device picker — pick & boot a simulator (iPhone or iPad) to capture.
+// Bridge-less: targets a booted simulator via simctl, so it works for ANY
+// app (Flutter, native iOS, iPad) and for RN apps without snap-bridge.
+const gtbDeviceBtn = document.createElement("button");
+gtbDeviceBtn.className = "btn btn-ghost mode-project";
+gtbDeviceBtn.title =
+	"Pick & boot a simulator (iPhone or iPad) to capture. Works without snap-bridge — for any app, including Flutter and native.";
+setBtnIcon(gtbDeviceBtn, "smartphone", "Device");
+gtbDeviceBtn.addEventListener("click", (ev) => {
+	ev.stopPropagation();
+	void openDeviceMenu(gtbDeviceBtn);
+});
+
 // Back button lives in column 1 of the topbar (next to the brand slot).
 // Inserted right after the brand so DOM order matches reading order.
 gtbBrand.insertAdjacentElement("afterend", gtbBackBtn);
@@ -2864,6 +3002,7 @@ gtbActions.append(
 	gtbPushBtn,
 	gtbAutoSnapBtn,
 	gtbTourBtn,
+	gtbDeviceBtn,
 	gtbSnapGroup,
 );
 
@@ -2938,6 +3077,113 @@ function openSnapMenu(
 	document.addEventListener("click", onDocClickCloseSnap, true);
 }
 
+// ── Device picker ─────────────────────────────────────────────────────────
+// The udid the bridge-less device snap targets. null = "the booted device"
+// (simctl's default). Set when the user picks a device from the menu.
+let selectedDeviceUdid: string | null = null;
+
+let deviceMenuOpen: HTMLDivElement | null = null;
+function closeDeviceMenu(): void {
+	if (!deviceMenuOpen) return;
+	deviceMenuOpen.remove();
+	deviceMenuOpen = null;
+	document.removeEventListener("click", onDocClickCloseDevice, true);
+}
+function onDocClickCloseDevice(ev: MouseEvent): void {
+	if (!deviceMenuOpen) return;
+	if (deviceMenuOpen.contains(ev.target as Node)) return;
+	closeDeviceMenu();
+}
+async function openDeviceMenu(anchor: HTMLElement): Promise<void> {
+	if (deviceMenuOpen) {
+		closeDeviceMenu();
+		return;
+	}
+	const rect = anchor.getBoundingClientRect();
+	const menu = ce("div", "gtb-snap-menu");
+	menu.style.top = `${rect.bottom + 6}px`;
+	menu.style.right = `${window.innerWidth - rect.right}px`;
+	const loading = ce("p", "gtb-snap-menu-hint");
+	loading.textContent = "Loading simulators…";
+	loading.style.padding = "10px 12px";
+	menu.appendChild(loading);
+	document.body.appendChild(menu);
+	deviceMenuOpen = menu;
+	document.addEventListener("click", onDocClickCloseDevice, true);
+
+	const res = await req.listDevices({});
+	if (deviceMenuOpen !== menu) return; // closed while the list loaded
+	menu.replaceChildren();
+	if (!res.ok) {
+		const err = ce("p", "gtb-snap-menu-hint");
+		err.textContent = res.error;
+		err.style.padding = "10px 12px";
+		menu.appendChild(err);
+		return;
+	}
+	if (res.devices.length === 0) {
+		const empty = ce("p", "gtb-snap-menu-hint");
+		empty.textContent =
+			"No simulators found. Add one in Xcode → Settings → Platforms.";
+		empty.style.padding = "10px 12px";
+		menu.appendChild(empty);
+		return;
+	}
+	const groups: Array<[("ipad" | "iphone" | "other"), string]> = [
+		["ipad", "iPad"],
+		["iphone", "iPhone"],
+		["other", "Other"],
+	];
+	for (const [kind, label] of groups) {
+		const inGroup = res.devices.filter((d) => d.kind === kind);
+		if (inGroup.length === 0) continue;
+		const header = ce("div");
+		header.textContent = label;
+		header.style.cssText =
+			"padding:8px 12px 2px;font-size:11px;font-weight:600;opacity:0.5;text-transform:uppercase;letter-spacing:0.04em;";
+		menu.appendChild(header);
+		for (const d of inGroup) {
+			const item = ce("button", "gtb-snap-menu-item");
+			item.type = "button";
+			const head = ce("div", "gtb-snap-menu-head");
+			const t = ce("span", "gtb-snap-menu-title");
+			t.textContent = d.name;
+			const k = ce("span", "gtb-snap-menu-kbd");
+			k.textContent = d.state === "Booted" ? "● booted" : d.runtime;
+			head.append(t, k);
+			const h = ce("p", "gtb-snap-menu-hint");
+			h.textContent =
+				selectedDeviceUdid === d.udid
+					? "Selected for capture"
+					: d.state === "Booted"
+						? "Booted — click to target for Snap"
+						: "Click to boot + target for Snap";
+			item.append(head, h);
+			item.addEventListener("click", () => {
+				closeDeviceMenu();
+				void bootAndSelectDevice(d.udid, d.name);
+			});
+			menu.appendChild(item);
+		}
+	}
+}
+
+async function bootAndSelectDevice(udid: string, name: string): Promise<void> {
+	selectedDeviceUdid = udid;
+	log(`Booting ${name}…`, "info");
+	const r = await req.bootDevice({ udid });
+	if (!r.ok) {
+		log(`Couldn't boot ${name}: ${r.error}`, "error");
+		return;
+	}
+	log(
+		r.alreadyBooted
+			? `${name} is ready — Snap will capture it.`
+			: `Booted ${name} — Snap will capture it.`,
+		"success",
+	);
+}
+
 function syncGlobalTopbar(): void {
 	const slug = state.get().rn.selectedProjectSlug;
 	if (slug == null) {
@@ -2955,8 +3201,11 @@ state.subscribe((s) => {
 	const projectSnaps = slug
 		? r.snaps.filter((n) => n.projectId === slug)
 		: r.snaps;
-	gtbSnapBtn.disabled = r.clientCount === 0 || r.busy;
-	gtbSnapCaret.disabled = r.clientCount === 0 || r.busy;
+	// Snap works with a connected bridge OR bridge-less via simctl, so it's
+	// available for any open mobile project — doSnap picks the path.
+	const snapAvailable = slug != null && projectTypeOf(slug) !== "web";
+	gtbSnapBtn.disabled = r.busy || !snapAvailable;
+	gtbSnapCaret.disabled = r.busy || !snapAvailable;
 	gtbSnapBtn.classList.toggle("is-busy", r.busy);
 	setBtnIcon(gtbSnapBtn, r.busy ? "loader" : "camera", r.busy ? "Capturing…" : "Snap");
 	// Tour button: only meaningful when bridge is connected for the
@@ -3038,10 +3287,22 @@ syncGlobalTopbar();
 
 state.subscribe(() => render());
 
-// Load project registry unconditionally at boot so the dashboard cards
-// render immediately. Previously this only fired when source.kind became
-// "iossim", which left the dashboard empty until the user opened a project.
-void refreshProjectRegistry();
+// Auth-gated boot: check for a persisted session. If signed in, load the
+// assigned-project registry so the dashboard renders immediately; otherwise
+// flip authChecked so render() shows the sign-in screen (not a blank dashboard).
+void (async () => {
+	try {
+		const { session } = await req.getSession({});
+		if (session) {
+			state.set((cur) => ({ ...cur, session, authChecked: true }));
+			await refreshProjectRegistry();
+		} else {
+			state.set((cur) => ({ ...cur, authChecked: true }));
+		}
+	} catch {
+		state.set((cur) => ({ ...cur, authChecked: true }));
+	}
+})();
 
 log(`${UI.app.name} ready — drop a folder/zip or paste a URL to begin.`);
 
@@ -3288,6 +3549,143 @@ function setAppVisible(visible: boolean): void {
 	if (app) app.style.display = visible ? "" : "none";
 }
 
+// ─── SIGN IN ───
+// First gate: a centered email + password card. On success the bun process
+// stores the Supabase session (session.json) and returns the user's assigned
+// projects, which become the dashboard registry. Sign-out clears the session.
+interface SigninRefs {
+	root: HTMLDivElement;
+	email: HTMLInputElement;
+	password: HTMLInputElement;
+	submit: HTMLButtonElement;
+	error: HTMLDivElement;
+}
+let signinRefs: SigninRefs | null = null;
+
+function buildSignin(): SigninRefs {
+	const root = ce("div", "signin-root");
+	root.id = "signin-root";
+	root.style.display = "none";
+	root.style.position = "fixed";
+	root.style.inset = "0";
+	root.style.zIndex = "1000";
+	root.style.alignItems = "center";
+	root.style.justifyContent = "center";
+	root.style.padding = "24px";
+	root.style.background = "var(--bg-0)";
+
+	const card = ce("div", "signin-card");
+	card.style.width = "360px";
+	card.style.maxWidth = "90vw";
+	card.style.display = "flex";
+	card.style.flexDirection = "column";
+	card.style.gap = "12px";
+	card.style.padding = "28px";
+	card.style.background = "var(--bg-1)";
+	card.style.border = "1px solid var(--bg-3)";
+	card.style.borderRadius = "14px";
+	card.style.boxShadow = "0 12px 40px rgba(0,0,0,0.25)";
+
+	const title = ce("h1", "dash-title");
+	title.textContent = "Sign in to Unicorn Capture";
+	const sub = ce("p", "dash-sub");
+	sub.textContent = "Use your Unicorn Studio gallery account.";
+
+	const email = ce("input", "input");
+	email.type = "email";
+	email.placeholder = "you@studio.com";
+	email.autocomplete = "username";
+
+	const password = ce("input", "input");
+	password.type = "password";
+	password.placeholder = "Password";
+	password.autocomplete = "current-password";
+
+	const submit = ce("button", "btn btn-primary");
+	submit.type = "button";
+	submit.textContent = "Sign in";
+
+	const error = ce("div", "signin-error");
+	error.style.color = "var(--danger, #e5484d)";
+	error.style.fontSize = "13px";
+	error.style.minHeight = "16px";
+
+	const onSubmit = (): void => void doSignIn();
+	submit.addEventListener("click", onSubmit);
+	email.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") password.focus();
+	});
+	password.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") onSubmit();
+	});
+
+	card.append(title, sub, email, password, submit, error);
+	root.appendChild(card);
+	return { root, email, password, submit, error };
+}
+
+function ensureSigninMounted(): SigninRefs {
+	if (!signinRefs) {
+		document.getElementById("signin-root")?.remove();
+		signinRefs = buildSignin();
+		document.body.appendChild(signinRefs.root);
+	}
+	return signinRefs;
+}
+
+function setSigninVisible(visible: boolean): void {
+	if (!signinRefs) return;
+	signinRefs.root.style.display = visible ? "flex" : "none";
+}
+
+async function doSignIn(): Promise<void> {
+	if (!signinRefs) return;
+	const email = signinRefs.email.value.trim();
+	const password = signinRefs.password.value;
+	if (!email || !password) {
+		signinRefs.error.textContent = "Enter your email and password.";
+		return;
+	}
+	signinRefs.error.textContent = "";
+	signinRefs.submit.disabled = true;
+	signinRefs.submit.textContent = "Signing in…";
+	try {
+		const res = await req.signIn({ email, password });
+		if (!res.ok) {
+			signinRefs.error.textContent = res.error;
+			return;
+		}
+		signinRefs.password.value = "";
+		state.set((cur) => ({
+			...cur,
+			session: res.session,
+			authChecked: true,
+			rn: { ...cur.rn, registry: res.projects, selectedProjectSlug: null },
+		}));
+	} catch (err) {
+		signinRefs.error.textContent =
+			(err as Error)?.message || "Sign-in failed. Please try again.";
+	} finally {
+		if (signinRefs) {
+			signinRefs.submit.disabled = false;
+			signinRefs.submit.textContent = "Sign in";
+		}
+	}
+}
+
+async function doSignOut(): Promise<void> {
+	try {
+		await req.signOut({});
+	} catch {
+		// Clear locally regardless of network outcome.
+	}
+	state.set((cur) => ({
+		...cur,
+		session: null,
+		rn: { ...cur.rn, registry: [], selectedProjectSlug: null },
+	}));
+}
+
 // ─── DASHBOARD (project picker) ───
 // First screen: grid of project cards from registry, search filter, Add modal.
 // Click a card → enters that project (mobile or web view based on type).
@@ -3295,6 +3693,7 @@ interface DashRefs {
 	root: HTMLDivElement;
 	cardsGrid: HTMLDivElement;
 	emptyState: HTMLDivElement;
+	accountLabel: HTMLSpanElement;
 }
 let dashRefs: DashRefs | null = null;
 
@@ -3336,6 +3735,22 @@ function buildDashboard(): DashRefs {
 	cleanupRow.append(cleanupBtn, clearCacheBtn);
 	heading.appendChild(cleanupRow);
 
+	// Signed-in account + sign out.
+	const accountRow = ce("div", "dash-account-row");
+	accountRow.style.display = "flex";
+	accountRow.style.alignItems = "center";
+	accountRow.style.gap = "10px";
+	accountRow.style.marginTop = "8px";
+	const accountLabel = ce("span", "dash-account");
+	accountLabel.style.fontSize = "12px";
+	accountLabel.style.opacity = "0.7";
+	const signOutBtn = ce("button", "btn btn-ghost btn-sm");
+	signOutBtn.type = "button";
+	signOutBtn.textContent = "Sign out";
+	signOutBtn.addEventListener("click", () => void doSignOut());
+	accountRow.append(accountLabel, signOutBtn);
+	heading.appendChild(accountRow);
+
 	const cardsGrid = ce("div", "dash-grid");
 	const emptyState = ce("div", "dash-empty");
 	const emptyIcon = ce("div", "dash-empty-icon");
@@ -3350,7 +3765,7 @@ function buildDashboard(): DashRefs {
 	inner.append(heading, cardsGrid, emptyState);
 	root.appendChild(inner);
 
-	return { root, cardsGrid, emptyState };
+	return { root, cardsGrid, emptyState, accountLabel };
 }
 
 function ensureDashMounted(): DashRefs {
@@ -3369,6 +3784,10 @@ function setDashVisible(visible: boolean): void {
 
 function renderDashboardCards(refs: DashRefs): void {
 	const r = state.get().rn;
+	const sess = state.get().session;
+	refs.accountLabel.textContent = sess
+		? `Signed in as ${sess.email}${sess.isOwner ? " · Owner" : ""}`
+		: "";
 	const q = dashSearchQuery.trim().toLowerCase();
 	const filtered = r.registry.filter((p) => {
 		if (!q) return true;
@@ -3397,12 +3816,20 @@ function renderDashboardCards(refs: DashRefs): void {
 		card.type = "button";
 		const type = projectTypeOf(p.slug);
 		const connected = r.projects.includes(p.slug);
+		// A "device project" is a non-web project with no local repo — created
+		// via "Add simulator app". It captures bridge-less via simctl, so the
+		// repo-only actions (Doctor / Refresh / Improve) don't apply.
+		const isDevice = type !== "web" && !p.rnAppDir;
 
 		const top = ce("div", "dash-card-top");
 		const badge = ce("span", `dash-card-type dash-card-type-${type}`);
-		badge.textContent = type === "web" ? "WEB" : "MOBILE";
+		badge.textContent = type === "web" ? "WEB" : isDevice ? "DEVICE" : "MOBILE";
 		const status = ce("span", `dash-card-status ${connected ? "is-connected" : ""}`);
-		status.title = connected ? "snap-bridge connected" : "not connected";
+		status.title = isDevice
+			? "Simulator capture — no snap-bridge needed"
+			: connected
+				? "snap-bridge connected"
+				: "not connected";
 		top.append(badge, status);
 
 		const nameEl = ce("div", "dash-card-name");
@@ -3473,7 +3900,13 @@ function renderDashboardCards(refs: DashRefs): void {
 			void doRemoveProject(p.slug, p.name);
 		});
 
-		actions.append(doctorBtn, refreshBtn, improveBtn, settingsBtn, removeBtn);
+		// Device projects have no repo, so Doctor / Refresh / Improve (all
+		// repo-bound) are omitted — only Settings and Remove apply.
+		if (isDevice) {
+			actions.append(settingsBtn, removeBtn);
+		} else {
+			actions.append(doctorBtn, refreshBtn, improveBtn, settingsBtn, removeBtn);
+		}
 
 		card.append(top, nameEl, slugEl, actions);
 		card.addEventListener("click", () => enterProject(p.slug));
@@ -3564,7 +3997,17 @@ function openAddTypeChooser(): void {
 		},
 	);
 
-	tiles.append(mobileTile, webTile);
+	const simulatorTile = mkTile(
+		"camera",
+		"Simulator",
+		"Snap any app in the iOS Simulator — Flutter, native, iPad, or RN. No code setup.",
+		() => {
+			close();
+			openAddSimulatorForm();
+		},
+	);
+
+	tiles.append(mobileTile, webTile, simulatorTile);
 
 	const actions = document.createElement("div");
 	actions.className = "rn-confirm-actions";
@@ -3589,6 +4032,154 @@ function openAddTypeChooser(): void {
 		if (e.target === backdrop) close();
 	});
 	document.addEventListener("keydown", onKey);
+}
+
+// Simulator project onboarding — minimal, no repo. Registers a gallery
+// project (platform ios) so bridge-less device snaps have somewhere to land.
+// Works for any simulator app: Flutter, native iOS, iPad, or RN without the
+// bridge. The exact device is chosen later via the topbar Device picker.
+function openAddSimulatorForm(): void {
+	const form = {
+		name: "",
+		platformUrl: readLocal("prisma:platform-url") ?? "",
+		token: readLocal("prisma:setup-token") ?? "",
+		error: undefined as string | undefined,
+		busy: false,
+	};
+
+	const backdrop = ce("div", "rn-confirm-backdrop");
+	const dlg = ce("div", "rn-confirm-dialog");
+	backdrop.appendChild(dlg);
+	document.body.appendChild(backdrop);
+
+	const close = (): void => {
+		backdrop.remove();
+		document.removeEventListener("keydown", onKey);
+	};
+	const onKey = (e: KeyboardEvent): void => {
+		if (e.key === "Escape") close();
+	};
+	backdrop.addEventListener("click", (e) => {
+		if (e.target === backdrop) close();
+	});
+	document.addEventListener("keydown", onKey);
+
+	const render = (): void => {
+		dlg.replaceChildren();
+		const title = ce("h3", "rn-confirm-title");
+		title.textContent = "Add a simulator app";
+		const body = ce("p", "rn-confirm-body");
+		body.textContent =
+			"Capture screens from any app running in the iOS Simulator — Flutter, native, React Native, or iPad. No code changes, no snap-bridge. You'll pick the exact device when you snap.";
+
+		const fields = ce("div", "rn-web-wizard-fields");
+		const mkField = (label: string, input: HTMLInputElement): void => {
+			const lab = ce("label", "rn-push-field-label");
+			lab.textContent = label;
+			fields.append(lab, input);
+		};
+		const nameInput = ce("input", "input");
+		nameInput.type = "text";
+		nameInput.placeholder = "e.g. Acme iPad app";
+		nameInput.value = form.name;
+		nameInput.addEventListener("input", () => {
+			form.name = nameInput.value;
+		});
+		mkField("Name", nameInput);
+
+		const urlInput = ce("input", "input");
+		urlInput.type = "url";
+		urlInput.placeholder = "https://unicorn-studio-gallery.vercel.app";
+		urlInput.value = form.platformUrl;
+		urlInput.addEventListener("input", () => {
+			form.platformUrl = urlInput.value;
+		});
+		mkField("Gallery URL", urlInput);
+
+		const tokenInput = ce("input", "input");
+		tokenInput.type = "password";
+		tokenInput.placeholder = "setup_… or an existing pgt_… token";
+		tokenInput.value = form.token;
+		tokenInput.addEventListener("input", () => {
+			form.token = tokenInput.value;
+		});
+		mkField("Setup token (or pgt_ project token)", tokenInput);
+
+		const errorBox = ce("div", "rn-wizard-error");
+		errorBox.style.display = form.error ? "" : "none";
+		errorBox.textContent = form.error ?? "";
+
+		const actions = ce("div", "rn-confirm-actions");
+		const cancelBtn = ce("button", "btn btn-ghost");
+		cancelBtn.type = "button";
+		cancelBtn.textContent = "Cancel";
+		cancelBtn.addEventListener("click", close);
+		const createBtn = ce("button", "btn btn-primary");
+		createBtn.type = "button";
+		createBtn.textContent = form.busy ? "Creating…" : "Create";
+		createBtn.disabled = form.busy;
+		createBtn.addEventListener("click", () => void runCreate());
+		actions.append(cancelBtn, createBtn);
+
+		dlg.append(title, body, fields, errorBox, actions);
+		queueMicrotask(() => nameInput.focus());
+	};
+
+	const runCreate = async (): Promise<void> => {
+		if (form.busy) return;
+		const name = form.name.trim();
+		const platformUrl = form.platformUrl.trim().replace(/\/$/, "");
+		const token = form.token.trim();
+		if (!name) {
+			form.error = "Name is required.";
+			render();
+			return;
+		}
+		// Gallery URL + token are optional for a signed-in user: the create is
+		// authenticated by the session (which also assigns the project), and the
+		// bun side defaults the gallery URL. Only validate a custom URL if typed.
+		if (platformUrl) {
+			try {
+				new URL(platformUrl);
+			} catch {
+				form.error = "Gallery URL must be a valid URL (include https://).";
+				render();
+				return;
+			}
+		}
+		form.busy = true;
+		form.error = undefined;
+		render();
+		// Optional token field, two kinds: a pgt_ token reuses an existing gallery
+		// project; anything else is treated as a setup token. With neither, the
+		// signed-in session creates + assigns the project.
+		const isProjectToken = token.startsWith("pgt_");
+		const r = await req.createDeviceProject({
+			name,
+			platformUrl,
+			...(token ? (isProjectToken ? { token } : { setupToken: token }) : {}),
+		});
+		if (!r.ok) {
+			form.busy = false;
+			form.error = r.error;
+			render();
+			return;
+		}
+		writeLocal("prisma:platform-url", platformUrl);
+		// Don't overwrite a saved setup token with a one-off project token.
+		if (!isProjectToken) writeLocal("prisma:setup-token", token);
+		log(
+			r.reused
+				? `↻ Linked simulator project "${r.slug}"`
+				: `+ Created simulator project "${r.slug}"`,
+			"success",
+		);
+		await refreshProjectRegistry();
+		close();
+		enterProject(r.slug);
+	};
+
+	render();
 }
 
 // Web project onboarding — phased wizard. Mirrors mobile's wizard-v2
@@ -3743,9 +4334,12 @@ function openAddWebForm(): void {
 			const baseUrl = wiz.baseUrl.trim();
 			const platformUrl = wiz.platformUrl.trim().replace(/\/$/, "");
 			const setupToken = wiz.setupToken.trim();
-			if (!name || !baseUrl || !platformUrl || !setupToken) {
-				wiz.error =
-					"Name, base URL, platform URL, and setup token are all required.";
+			// Platform URL + setup token are optional for a signed-in user: the
+			// create is authenticated by the session (which assigns the project)
+			// and the bun side defaults the gallery URL. Base URL is still required
+			// — a web project needs somewhere to capture from.
+			if (!name || !baseUrl) {
+				wiz.error = "Name and base URL are required.";
 				render();
 				return;
 			}
@@ -4574,12 +5168,40 @@ async function doSnap(
 	if (state.get().rn.busy) return; // double-click guard
 	state.set((cur) => ({ ...cur, rn: { ...cur.rn, busy: true } }));
 	try {
-		const r = await req.performSnap({
-			projectSlug: state.get().rn.selectedProjectSlug ?? undefined,
-			mode,
-			forceFlowId: target?.forceFlowId,
-			forceScreen: target?.forceScreen,
-		});
+		const st = state.get();
+		const slug = st.rn.selectedProjectSlug ?? undefined;
+		// Snap uses the connected bridge (rich route/state/full-page) when
+		// present, else falls back to a bridge-less simctl device capture so
+		// ANY booted simulator app (Flutter, native, iPad, or a disconnected
+		// RN app) still snaps.
+		const bridgeConnected = !!slug && st.rn.projects.includes(slug);
+		let r: Awaited<ReturnType<typeof req.performSnap>>;
+		if (bridgeConnected) {
+			r = await req.performSnap({
+				projectSlug: slug,
+				mode,
+				forceFlowId: target?.forceFlowId,
+				forceScreen: target?.forceScreen,
+			});
+		} else if (!slug) {
+			log("Open a project first, then Snap.", "error");
+			return;
+		} else {
+			const dr = await req.deviceSnap({
+				projectSlug: slug,
+				deviceUdid: selectedDeviceUdid ?? undefined,
+				forceFlowId: target?.forceFlowId,
+			});
+			r = dr.ok
+				? {
+						ok: true,
+						snap: dr.snap,
+						recordKind: "appended",
+						placement: dr.placement,
+						captureMethod: dr.captureMethod,
+					}
+				: { ok: false, error: dr.error };
+		}
 		if (!r.ok) {
 			log(r.error, "error");
 			return;
@@ -6453,10 +7075,33 @@ function showPushDialog(opts: {
 
 async function refreshProjectRegistry(): Promise<void> {
 	try {
-		const r = await req.listProjects({});
-		state.set((cur) => ({ ...cur, rn: { ...cur.rn, registry: r.projects } }));
+		const r = await req.listAssignedProjects({});
+		if (!r.ok) {
+			// Session expired / revoked → drop to the sign-in screen.
+			if (r.needsSignIn) {
+				state.set((cur) => ({
+					...cur,
+					session: null,
+					rn: { ...cur.rn, registry: [], selectedProjectSlug: null },
+				}));
+			}
+			return;
+		}
+		state.set((cur) => ({
+			...cur,
+			session: cur.session
+				? {
+						...cur.session,
+						isOwner: r.user.isOwner,
+						role: r.user.role,
+						email: r.user.email,
+					}
+				: cur.session,
+			rn: { ...cur.rn, registry: r.projects },
+		}));
 	} catch {
-		// ignore
+		// ignore — keep the last-known registry so a transient network blip
+		// doesn't blank the dashboard.
 	}
 }
 
@@ -7025,6 +7670,7 @@ function applyRnState(s: AppState): void {
 			bezelDark.src = "iphone-17-dark.png";
 			bezelDark.alt = "";
 			bezel.append(bezelScreen, bezelLight, bezelDark);
+			attachBezelSizing(img, bezel, bezelScreen, [bezelLight, bezelDark]);
 
 			const cardLabel = ce("div", "rn-card-label");
 			const cardName = ce("p", "rn-card-name");
@@ -7521,6 +8167,112 @@ function saveSidebarCollapsed(value: boolean): void {
 	} catch {}
 }
 
+interface IpadBezel {
+	src: string;
+	/** Screen-cutout aspect (w/h) — matched against the screenshot's ratio. */
+	screenAspect: number;
+	/** Frame PNG aspect (w/h) — drives the bezel container's aspect-ratio. */
+	frameAspect: number;
+	/** Screen-cutout inset as a % of the frame, top/right/bottom/left. */
+	t: number;
+	r: number;
+	b: number;
+	l: number;
+}
+// iPad device frames (portrait + landscape), insets measured from each PNG's
+// transparent screen cutout. A capture is matched to the closest screenAspect
+// so an iPad screenshot gets an iPad frame instead of the iPhone bezel
+// (which squeezed 4:3 content into a 9:19.5 phone and clipped it).
+const IPAD_BEZELS: IpadBezel[] = [
+	{ src: "ipad-mini-portrait", screenAspect: 0.657, frameAspect: 890 / 1275, t: 5.57, r: 8.2, b: 5.57, l: 8.2 },
+	{ src: "ipad-11-portrait", screenAspect: 0.689, frameAspect: 940 / 1320, t: 4.17, r: 5.64, b: 4.17, l: 5.64 },
+	{ src: "ipad-13-portrait", screenAspect: 0.75, frameAspect: 1150 / 1500, t: 4.13, r: 5.13, b: 4.13, l: 5.13 },
+	{ src: "ipad-mini", screenAspect: 1.523, frameAspect: 1275 / 890, t: 8.2, r: 5.57, b: 8.2, l: 5.57 },
+	{ src: "ipad-11", screenAspect: 1.451, frameAspect: 1320 / 940, t: 5.64, r: 4.17, b: 5.64, l: 4.17 },
+	{ src: "ipad-13", screenAspect: 1.333, frameAspect: 1500 / 1150, t: 5.13, r: 4.13, b: 5.13, l: 4.13 },
+];
+const IPHONE_SCREEN_ASPECT = 0.488;
+
+/** Closest iPad frame to a screenshot ratio, or null to keep the iPhone
+ *  default when the capture is phone-shaped. Log-distance so portrait and
+ *  landscape match symmetrically. */
+function chooseBezel(ratio: number): IpadBezel | null {
+	if (!Number.isFinite(ratio) || ratio <= 0) return null;
+	let best: IpadBezel | null = null;
+	let bestDist = Math.abs(Math.log(ratio / IPHONE_SCREEN_ASPECT));
+	for (const b of IPAD_BEZELS) {
+		const d = Math.abs(Math.log(ratio / b.screenAspect));
+		if (d < bestDist) {
+			bestDist = d;
+			best = b;
+		}
+	}
+	return best;
+}
+
+/** Size a bezel (card or lightbox) to a screenshot's aspect. iPad frames get
+ *  the measured inset + frame PNG; phone-shaped captures reset to the CSS
+ *  default + iPhone frame. Inset-based so it works for both layouts. */
+function styleBezelForRatio(
+	bezel: HTMLElement,
+	screen: HTMLElement,
+	frames: HTMLImageElement[],
+	ratio: number,
+	iphoneLight: string,
+	iphoneDark: string,
+): void {
+	const choice = chooseBezel(ratio);
+	const s = screen.style;
+	if (!choice) {
+		bezel.style.aspectRatio = "";
+		s.top = "";
+		s.left = "";
+		s.right = "";
+		s.bottom = "";
+		s.width = "";
+		s.height = "";
+		s.borderRadius = "";
+		if (frames[0]) frames[0].src = iphoneLight;
+		if (frames[1]) frames[1].src = iphoneDark;
+		return;
+	}
+	bezel.style.aspectRatio = String(choice.frameAspect);
+	s.top = `${choice.t}%`;
+	s.left = `${choice.l}%`;
+	s.right = `${choice.r}%`;
+	s.bottom = `${choice.b}%`;
+	s.width = "auto";
+	s.height = "auto";
+	s.borderRadius = "2.6%";
+	for (const f of frames) f.src = `${choice.src}.png`;
+}
+
+/** Apply the right bezel once the screenshot's intrinsic size is known, and
+ *  re-apply whenever the image src changes (lightbox navigation). */
+function attachBezelSizing(
+	img: HTMLImageElement,
+	bezel: HTMLElement,
+	screen: HTMLElement,
+	frames: HTMLImageElement[],
+	iphoneLight = "iphone-17.png",
+	iphoneDark = "iphone-17-dark.png",
+): void {
+	const run = (): void => {
+		if (img.naturalWidth && img.naturalHeight) {
+			styleBezelForRatio(
+				bezel,
+				screen,
+				frames,
+				img.naturalWidth / img.naturalHeight,
+				iphoneLight,
+				iphoneDark,
+			);
+		}
+	};
+	if (img.complete) run();
+	img.addEventListener("load", run);
+}
+
 /**
  * Lightbox preview — opens a snap in a full-screen iPhone bezel like the web
  * frame page. ←/→ navigate within the flow's snaps, Esc closes.
@@ -7595,6 +8347,7 @@ function openSnapLightbox(
 	bezelDark.src = "iphone-17-dark.png";
 	bezelDark.alt = "";
 	bezel.append(bezelScreen, bezelLight, bezelDark);
+	attachBezelSizing(img, bezel, bezelScreen, [bezelLight, bezelDark]);
 
 	const nextBtn = ce("button", "rn-lightbox-nav rn-lightbox-next");
 	nextBtn.type = "button";
@@ -8112,7 +8865,27 @@ function ensureRouteIndicatorPolling(): void {
 	}, 2000);
 }
 
+function stopRnPolling(): void {
+	if (rnPollTimer) {
+		clearInterval(rnPollTimer);
+		rnPollTimer = null;
+	}
+	if (rnRoutePollTimer) {
+		clearInterval(rnRoutePollTimer);
+		rnRoutePollTimer = null;
+	}
+}
+
 state.subscribe((s) => {
+	// Never poll or auto-refresh while signed out. Critically, this also breaks a
+	// busy-loop: when a session expires mid-project, refreshProjectRegistry's
+	// needsSignIn branch sets session=null + registry=[] while source.kind stays
+	// "iossim" — without this guard that state change would re-enter the
+	// registry-empty refresh below and spin forever.
+	if (!s.session) {
+		stopRnPolling();
+		return;
+	}
 	if (s.source.kind === "iossim") {
 		ensureRnPolling();
 		ensureRouteIndicatorPolling();
