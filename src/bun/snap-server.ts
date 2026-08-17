@@ -226,6 +226,19 @@ export interface WebExtBackend {
 		  }
 		| { ok: false; error: string }
 	>;
+	/**
+	 * Attach a recorded motion clip (webm/mp4) to the latest snap of the
+	 * page's route. Requires the still to exist — it doubles as poster.
+	 */
+	attachVideo(opts: {
+		projectId: string;
+		url: string;
+		videoBytes: Uint8Array;
+		mimeType: string;
+	}): Promise<
+		| { ok: true; record: Record<string, unknown>; route: string }
+		| { ok: false; error: string }
+	>;
 }
 
 export interface StartSnapServerOptions {
@@ -552,6 +565,58 @@ export function startSnapServer(
 						fullPage,
 						flowId,
 						pngBytes,
+					});
+					return jsonResponse(result, {
+						status: result.ok ? 200 : 500,
+					});
+				} catch (err) {
+					return jsonResponse(
+						{ ok: false, error: (err as Error).message },
+						{ status: 500 },
+					);
+				}
+			}
+
+			if (url.pathname === "/web-ext/video" && req.method === "POST") {
+				const backend = webExtBackend();
+				if (!backend) {
+					return jsonResponse(
+						{ ok: false, error: "web-ext backend not ready" },
+						{ status: 503 },
+					);
+				}
+				const projectId = url.searchParams.get("projectId") ?? "";
+				const pageUrl = url.searchParams.get("url") ?? "";
+				if (!projectId || !pageUrl) {
+					return jsonResponse(
+						{ ok: false, error: "projectId and url are required" },
+						{ status: 400 },
+					);
+				}
+				const ct = req.headers.get("content-type") ?? "";
+				if (!ct.startsWith("video/webm") && !ct.startsWith("video/mp4")) {
+					return jsonResponse(
+						{
+							ok: false,
+							error: `expected video/webm or video/mp4 body, got '${ct || "<none>"}'`,
+						},
+						{ status: 415 },
+					);
+				}
+				const ab = await req.arrayBuffer();
+				const videoBytes = new Uint8Array(ab);
+				if (videoBytes.byteLength === 0) {
+					return jsonResponse(
+						{ ok: false, error: "empty video body" },
+						{ status: 400 },
+					);
+				}
+				try {
+					const result = await backend.attachVideo({
+						projectId,
+						url: pageUrl,
+						videoBytes,
+						mimeType: ct.split(";")[0] ?? "video/webm",
 					});
 					return jsonResponse(result, {
 						status: result.ok ? 200 : 500,

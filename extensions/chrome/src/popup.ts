@@ -28,6 +28,7 @@ const statusEl = document.getElementById("status") as HTMLDivElement;
 const viewportBtn = document.getElementById("snap-viewport") as HTMLButtonElement;
 const fullPageBtn = document.getElementById("snap-fullpage") as HTMLButtonElement;
 const pdfBtn = document.getElementById("snap-pdf") as HTMLButtonElement;
+const recordBtn = document.getElementById("record-clip") as HTMLButtonElement;
 
 // In-memory flow list for the custom picker. Each row carries its depth so
 // the renderer can draw a tree-indent prefix; ancestors lets us future-proof
@@ -89,6 +90,7 @@ async function loadProjects() {
 		viewportBtn.disabled = false;
 		fullPageBtn.disabled = false;
 		pdfBtn.disabled = false;
+		recordBtn.disabled = false;
 		setStatus("Ready.", "idle");
 		await loadFlowsForCurrentProject();
 	} catch (err) {
@@ -571,6 +573,313 @@ async function savePdf() {
 		pdfBtn.disabled = false;
 	}
 }
+
+// ─── motion clip recording ───────────────────────────────────────────────
+// Records the tab via CDP Page.startScreencast — the same chrome.debugger
+// permission the snapshots use, so no activeTab invocation is needed.
+// Frames are drawn onto an offscreen canvas as they arrive and the canvas
+// stream is encoded live by MediaRecorder. A synthetic cursor overlay is
+// installed through Runtime.evaluate for the duration so hover/click
+// interactions stay visible.
+
+const MAX_RECORD_MS = 60_000;
+const RECORD_BITS_PER_SEC = 1_800_000;
+const SCREENCAST_MAX_DIM = 1600;
+
+let recorder: MediaRecorder | null = null;
+let recordStream: MediaStream | null = null;
+let recordChunks: Blob[] = [];
+let recordTabInfo: { id: number; url: string } | null = null;
+let recordStopTimer: number | null = null;
+let recordTickTimer: number | null = null;
+let recordKeepAlive: number | null = null;
+let recordStartedAt = 0;
+let recordCanvas: HTMLCanvasElement | null = null;
+let recordCtx: CanvasRenderingContext2D | null = null;
+let recordLastFrame: HTMLImageElement | null = null;
+let recordAttached = false;
+let recordPoster: Uint8Array | null = null;
+let recordOnEvent:
+	| ((source: chrome.debugger.Debuggee, method: string, params?: object) => void)
+	| null = null;
+
+const CURSOR_OVERLAY_INSTALL = `(() => {
+	if (window.__ucCursorCleanup) return;
+	const dot = document.createElement("div");
+	dot.style.cssText = "position:fixed;left:-100px;top:-100px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,0.45);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);pointer-events:none;z-index:2147483647;transform:translate(-50%,-50%);transition:transform 120ms ease;";
+	const move = (e) => { dot.style.left = e.clientX + "px"; dot.style.top = e.clientY + "px"; };
+	const down = () => { dot.style.transform = "translate(-50%,-50%) scale(0.6)"; dot.style.background = "rgba(46,123,255,0.6)"; };
+	const up = () => { dot.style.transform = "translate(-50%,-50%) scale(1)"; dot.style.background = "rgba(0,0,0,0.45)"; };
+	document.addEventListener("pointermove", move, true);
+	document.addEventListener("pointerdown", down, true);
+	document.addEventListener("pointerup", up, true);
+	document.documentElement.appendChild(dot);
+	window.__ucCursorCleanup = () => {
+		document.removeEventListener("pointermove", move, true);
+		document.removeEventListener("pointerdown", down, true);
+		document.removeEventListener("pointerup", up, true);
+		dot.remove();
+		delete window.__ucCursorCleanup;
+	};
+})()`;
+const CURSOR_OVERLAY_REMOVE = `window.__ucCursorCleanup && window.__ucCursorCleanup()`;
+
+function pickRecorderMime(): { mime: string; base: "video/mp4" | "video/webm" } {
+	const ladder: Array<{ mime: string; base: "video/mp4" | "video/webm" }> = [
+		{ mime: 'video/mp4;codecs="avc1.42E01E"', base: "video/mp4" },
+		{ mime: "video/mp4", base: "video/mp4" },
+		{ mime: "video/webm;codecs=h264", base: "video/webm" },
+		{ mime: "video/webm;codecs=vp9", base: "video/webm" },
+		{ mime: "video/webm", base: "video/webm" },
+	];
+	for (const c of ladder) {
+		if (MediaRecorder.isTypeSupported(c.mime)) return c;
+	}
+	return { mime: "", base: "video/webm" };
+}
+
+function setRecordButtonIdle(): void {
+	recordBtn.classList.remove("recording");
+	recordBtn.textContent = "Record clip · 60s max";
+}
+
+function recordCleanup(): void {
+	if (recordStopTimer != null) clearTimeout(recordStopTimer);
+	if (recordTickTimer != null) clearInterval(recordTickTimer);
+	if (recordKeepAlive != null) clearInterval(recordKeepAlive);
+	recordStopTimer = null;
+	recordTickTimer = null;
+	recordKeepAlive = null;
+	for (const t of recordStream?.getTracks() ?? []) t.stop();
+	recordStream = null;
+	recorder = null;
+	recordCanvas = null;
+	recordCtx = null;
+	recordLastFrame = null;
+	if (recordOnEvent) {
+		chrome.debugger.onEvent.removeListener(recordOnEvent);
+		recordOnEvent = null;
+	}
+	const info = recordTabInfo;
+	if (recordAttached && info) {
+		const target: chrome.debugger.Debuggee = { tabId: info.id };
+		recordAttached = false;
+		void (async () => {
+			await sendCmd(target, "Runtime.evaluate", {
+				expression: CURSOR_OVERLAY_REMOVE,
+			}).catch(() => {});
+			await sendCmd(target, "Page.stopScreencast", {}).catch(() => {});
+			await chrome.debugger.detach(target).catch(() => {});
+		})();
+	}
+	viewportBtn.disabled = false;
+	fullPageBtn.disabled = false;
+	pdfBtn.disabled = false;
+	setRecordButtonIdle();
+}
+
+async function uploadClip(blob: Blob, base: string): Promise<void> {
+	const info = recordTabInfo;
+	if (!info) return;
+	const projectId = projectEl.value;
+	setStatus("Uploading clip…", "working");
+	const postClip = async (): Promise<
+		{ ok: true; route: string } | { ok: false; error: string }
+	> => {
+		const params = new URLSearchParams({ projectId, url: info.url });
+		const res = await fetch(`${CAPTURE_BASE}/web-ext/video?${params}`, {
+			method: "POST",
+			headers: { "content-type": base },
+			body: blob,
+		});
+		return (await res.json()) as
+			| { ok: true; route: string }
+			| { ok: false; error: string };
+	};
+	try {
+		let body = await postClip();
+		if (!body.ok && /No snap exists/i.test(body.error) && recordPoster) {
+			// The page was never snapped — create the snap from the poster we
+			// grabbed at record start, then retry the clip attach once.
+			setStatus("No snap yet — creating one from the recording…", "working");
+			const snapParams = new URLSearchParams({
+				projectId,
+				url: info.url,
+				fullPage: "0",
+			});
+			const flowId = getCurrentFlowId();
+			if (flowId) snapParams.set("flowId", flowId);
+			const snapRes = await fetch(`${CAPTURE_BASE}/web-ext/snap?${snapParams}`, {
+				method: "POST",
+				headers: { "content-type": "image/png" },
+				body: recordPoster,
+			});
+			const snapBody = (await snapRes.json()) as
+				| { ok: true }
+				| { ok: false; error: string };
+			if (!snapBody.ok) {
+				setStatus(`Auto-snap failed: ${snapBody.error}`, "error");
+				return;
+			}
+			body = await postClip();
+		}
+		if (!body.ok) {
+			setStatus(body.error, "error");
+			return;
+		}
+		setStatus(
+			`Clip attached to ${body.route} — plays in the gallery on next push.`,
+			"success",
+		);
+	} catch (err) {
+		setStatus(`Clip upload failed: ${(err as Error).message}`, "error");
+	} finally {
+		recordPoster = null;
+	}
+}
+
+async function startRecording(): Promise<void> {
+	if (recorder) return;
+	const tab = await readSourceTab();
+	if (!tab?.id || !tab.url) {
+		setStatus("No active tab in the browser window.", "error");
+		return;
+	}
+	if (!projectEl.value) {
+		setStatus("Pick a project first.", "error");
+		return;
+	}
+	recordTabInfo = { id: tab.id, url: tab.url };
+	const target: chrome.debugger.Debuggee = { tabId: tab.id };
+	try {
+		await chrome.debugger.attach(target, "1.3");
+		recordAttached = true;
+		// Grab a poster still before the cursor overlay goes in. If no snap
+		// exists for this page yet, uploadClip auto-creates one from this so
+		// the designer never has to remember the snap-then-record order.
+		recordPoster = null;
+		try {
+			const shot = (await sendCmd(target, "Page.captureScreenshot", {
+				format: "png",
+				fromSurface: true,
+			})) as { data: string };
+			recordPoster = base64ToBytes(shot.data);
+			(shot as { data?: string }).data = undefined;
+		} catch {
+			// Poster is best-effort — recording still works when a snap
+			// already exists for the route.
+		}
+		await sendCmd(target, "Runtime.evaluate", {
+			expression: CURSOR_OVERLAY_INSTALL,
+		}).catch(() => {});
+
+		recordCanvas = document.createElement("canvas");
+		recordCtx = recordCanvas.getContext("2d");
+		if (!recordCtx) throw new Error("canvas 2d context unavailable");
+
+		let firstFrameResolve: (() => void) | null = null;
+		const firstFrame = new Promise<void>((resolve, reject) => {
+			firstFrameResolve = resolve;
+			setTimeout(
+				() => reject(new Error("no frames from the tab — make sure it stays visible")),
+				4000,
+			);
+		});
+		recordOnEvent = (source, method, params) => {
+			if (source.tabId !== tab.id || method !== "Page.screencastFrame") return;
+			const p = params as { data: string; sessionId: number };
+			void sendCmd(target, "Page.screencastFrameAck", {
+				sessionId: p.sessionId,
+			}).catch(() => {});
+			const img = new Image();
+			img.onload = () => {
+				if (!recordCanvas || !recordCtx) return;
+				if (
+					recordCanvas.width !== img.naturalWidth ||
+					recordCanvas.height !== img.naturalHeight
+				) {
+					recordCanvas.width = img.naturalWidth;
+					recordCanvas.height = img.naturalHeight;
+				}
+				recordCtx.drawImage(img, 0, 0);
+				recordLastFrame = img;
+				if (firstFrameResolve) {
+					firstFrameResolve();
+					firstFrameResolve = null;
+				}
+			};
+			img.src = `data:image/jpeg;base64,${p.data}`;
+		};
+		chrome.debugger.onEvent.addListener(recordOnEvent);
+		await sendCmd(target, "Page.startScreencast", {
+			format: "jpeg",
+			quality: 75,
+			maxWidth: SCREENCAST_MAX_DIM,
+			maxHeight: SCREENCAST_MAX_DIM,
+			everyNthFrame: 1,
+		});
+		await firstFrame;
+
+		recordStream = recordCanvas.captureStream(30);
+		const { mime, base } = pickRecorderMime();
+		recordChunks = [];
+		recorder = new MediaRecorder(recordStream, {
+			...(mime ? { mimeType: mime } : {}),
+			videoBitsPerSecond: RECORD_BITS_PER_SEC,
+		});
+		recorder.ondataavailable = (e) => {
+			if (e.data.size > 0) recordChunks.push(e.data);
+		};
+		recorder.onstop = () => {
+			const blob = new Blob(recordChunks, { type: base });
+			recordChunks = [];
+			recordCleanup();
+			if (blob.size === 0) {
+				setStatus("Recording produced no data.", "error");
+				return;
+			}
+			void uploadClip(blob, base);
+		};
+		recorder.start(1000);
+		recordStartedAt = Date.now();
+		// Repaint the last frame on an interval so the canvas stream keeps
+		// emitting during static stretches (captureStream only fires on
+		// canvas changes; without this, still periods produce no frames).
+		recordKeepAlive = setInterval(() => {
+			if (recordCtx && recordLastFrame) recordCtx.drawImage(recordLastFrame, 0, 0);
+		}, 200) as unknown as number;
+		// Recording holds the CDP attachment — a snap during recording would
+		// fight over it, so park the snap buttons until we're done.
+		viewportBtn.disabled = true;
+		fullPageBtn.disabled = true;
+		pdfBtn.disabled = true;
+		recordBtn.classList.add("recording");
+		recordBtn.textContent = "Stop recording · 0:00";
+		setStatus("Recording… interact with the page, then stop.", "working");
+		recordTickTimer = setInterval(() => {
+			const sec = Math.floor((Date.now() - recordStartedAt) / 1000);
+			const mm = Math.floor(sec / 60);
+			const ss = String(sec % 60).padStart(2, "0");
+			recordBtn.textContent = `Stop recording · ${mm}:${ss}`;
+		}, 500) as unknown as number;
+		recordStopTimer = setTimeout(() => {
+			if (recorder && recorder.state !== "inactive") recorder.stop();
+		}, MAX_RECORD_MS) as unknown as number;
+	} catch (err) {
+		recordCleanup();
+		setStatus(`Recording failed: ${(err as Error).message}`, "error");
+	}
+}
+
+function toggleRecording(): void {
+	if (recorder && recorder.state !== "inactive") {
+		recorder.stop();
+		return;
+	}
+	void startRecording();
+}
+
+recordBtn.addEventListener("click", () => toggleRecording());
 
 viewportBtn.addEventListener("click", () => void snap(false));
 fullPageBtn.addEventListener("click", () => void snap(true));

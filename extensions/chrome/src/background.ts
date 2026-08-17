@@ -33,3 +33,38 @@ chrome.runtime.onInstalled.addListener(() => {
 			console.warn("setOptions failed:", (err as Error)?.message),
 		);
 });
+
+
+// The side panel document doesn't get the chrome.tabCapture API (Chrome
+// exposes it to the service worker / foreground pages only), so the panel
+// asks us for a media stream id and consumes it with getUserMedia on its
+// side. getMediaStreamId here runs with the extension's tabCapture
+// permission + the activeTab grant from the user's interaction.
+chrome.runtime.onMessage.addListener(
+	(
+		msg: { cmd?: string; targetTabId?: number },
+		_sender,
+		sendResponse: (r: { ok: boolean; streamId?: string; error?: string }) => void,
+	) => {
+		if (msg?.cmd !== "uc-get-tab-stream-id" || !msg.targetTabId) return;
+		try {
+			chrome.tabCapture.getMediaStreamId(
+				{ targetTabId: msg.targetTabId },
+				(streamId) => {
+					const err = chrome.runtime.lastError;
+					if (err || !streamId) {
+						sendResponse({
+							ok: false,
+							error: err?.message ?? "tabCapture returned no stream id",
+						});
+					} else {
+						sendResponse({ ok: true, streamId });
+					}
+				},
+			);
+		} catch (err) {
+			sendResponse({ ok: false, error: (err as Error).message });
+		}
+		return true; // keep the message channel open for the async response
+	},
+);
