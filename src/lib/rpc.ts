@@ -76,6 +76,11 @@ export interface RnSnapInfo {
 	 * the viewport). Library renders these as tall scrollable tiles.
 	 */
 	fullPage?: boolean;
+	/**
+	 * Absolute path of the motion clip (webm/mp4) recorded for this snap.
+	 * Library shows a CLIP badge on the card and plays it in the lightbox.
+	 */
+	videoPath?: string;
 }
 
 export interface RnFlowScreen {

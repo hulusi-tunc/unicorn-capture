@@ -28,6 +28,12 @@ export interface PlatformManifest {
 			id: string;
 			name: string;
 			image: string;
+			/**
+			 * Optional motion clip (webm/mp4) proving the screen's
+			 * animations. Local relative path pre-push; the gallery
+			 * rewrites it to a public storage URL on intake.
+			 */
+			video?: string;
 			/** Index of this frame within its flow (display order). */
 			position?: number;
 			/**
@@ -347,9 +353,14 @@ export function sessionToPlatformManifest(
 		const variantIdx =
 			variantIndices.get(`${snap.sessionId}#${snap.sequence}`) ?? 0;
 		bucket.frames.push({
-			id: frameIdFromSnap(snap),
+			// Gallery-synced snaps keep their original gallery frame id so a
+			// push upserts the SAME row (comments intact) instead of minting a
+			// duplicate; their `image` is the storage URL they already live at
+			// — the intake accepts it as-is without new bytes.
+			id: snap.gallerySyncRef ?? frameIdFromSnap(snap),
 			name: frameNameFromSnap(snap, variantIdx),
-			image: snap.image,
+			image: snap.image || snap.remoteImageUrl || "",
+			video: snap.video,
 			position: framePositions.get(`${snap.sessionId}#${snap.sequence}`),
 			versions:
 				snap.versions && snap.versions.length > 0
@@ -434,6 +445,12 @@ const HARD_FRAME_BYTES = 40_000_000;
 // can write JPEG natively (it can't write WebP), so this stays dep-free.
 const RECODE_PNG_THRESHOLD = 1_500_000;
 const JPEG_QUALITY = 85;
+// Motion clips are already compressed (vp9/h264) so no recode pass — just a
+// sanity ceiling. A 60s recording at ~1.8Mbps lands around 13MB; anything
+// past this is a runaway recording. NOTE: pushes through hosted Vercel cap
+// request bodies at ~4.5MB — long clips need the direct-to-storage upload
+// path before the gallery intake moves back behind Vercel.
+const VIDEO_MAX_BYTES = 50_000_000;
 
 /**
  * Re-encode PNG bytes to JPEG via macOS `sips` so we can fit large web
@@ -472,6 +489,70 @@ async function recodePngToJpeg(
 	} finally {
 		await unlink(tmpIn).catch(() => {});
 		await unlink(tmpOut).catch(() => {});
+	}
+}
+
+/**
+ * Upload a motion clip straight to Supabase Storage. Asks the gallery's
+ * clip-upload endpoint (sibling of the upload endpoint) for a signed URL,
+ * PUTs the bytes there, and returns the clip's public URL — which then
+ * rides in the push manifest instead of the raw bytes.
+ */
+async function uploadClipDirect(args: {
+	uploadEndpoint: string;
+	token: string;
+	buildSha: string;
+	flowId: string;
+	frameId: string;
+	localPath: string;
+	bytes: Uint8Array;
+	log: (m: string) => void;
+}): Promise<string | null> {
+	const { uploadEndpoint, token, buildSha, flowId, frameId, localPath, bytes, log } = args;
+	const ext = localPath.toLowerCase().endsWith(".mp4") ? "mp4" : "webm";
+	const clipEndpoint = uploadEndpoint.replace(/\/upload(\?.*)?$/, "/clip-upload");
+	try {
+		const res = await fetch(clipEndpoint, {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${token}`,
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ buildSha, flowId, frameId, ext }),
+		});
+		if (!res.ok) {
+			const txt = await res.text().catch(() => "");
+			log(`clip signed-url failed (${res.status}): ${txt.slice(0, 160)}`);
+			return null;
+		}
+		const body = (await res.json()) as {
+			ok?: boolean;
+			signedUrl?: string;
+			publicUrl?: string;
+			error?: string;
+		};
+		if (!body.ok || !body.signedUrl || !body.publicUrl) {
+			log(`clip signed-url failed: ${body.error ?? "malformed response"}`);
+			return null;
+		}
+		const put = await fetch(body.signedUrl, {
+			method: "PUT",
+			headers: {
+				"content-type": ext === "mp4" ? "video/mp4" : "video/webm",
+				"x-upsert": "true",
+			},
+			body: bytes as unknown as BodyInit,
+		});
+		if (!put.ok) {
+			const txt = await put.text().catch(() => "");
+			log(`clip storage PUT failed (${put.status}): ${txt.slice(0, 160)}`);
+			return null;
+		}
+		log(`  · ${localPath} → storage (${(bytes.byteLength / 1_000_000).toFixed(1)}MB direct)`);
+		return body.publicUrl;
+	} catch (err) {
+		log(`clip upload error: ${(err as Error).message}`);
+		return null;
 	}
 }
 
@@ -672,11 +753,16 @@ async function uploadOne(args: {
 	// the UI's post-push summary modal can show what didn't make it.
 	const frameBytes = new Map<string, Uint8Array>();
 	const versionBytes = new Map<string, Uint8Array>();
+	// local clip path → public storage URL after direct upload
+	const videoUrls = new Map<string, string>();
 	const frameContentType = new Map<string, string>();
 	const versionContentType = new Map<string, string>();
 	const skipped: UploadSkipped[] = [];
 	let recoded = 0;
 	let savedBytes = 0;
+
+	const isRemoteImage = (p: string): boolean =>
+		p.startsWith("https://") || p.startsWith("http://");
 
 	const maybeRecode = async (
 		key: string,
@@ -699,6 +785,9 @@ async function uploadOne(args: {
 
 	for (const flow of manifest.flows) {
 		for (const frame of flow.frames) {
+			// Storage-URL re-ref (gallery-synced snap) — nothing to read or
+			// upload; the manifest entry alone re-registers the frame.
+			if (isRemoteImage(frame.image)) continue;
 			const filePath = join(outDir, frame.image);
 			try {
 				const raw = new Uint8Array(await readFile(filePath));
@@ -712,6 +801,45 @@ async function uploadOne(args: {
 						: "read-error";
 				skipped.push({ image: frame.image, reason });
 				continue;
+			}
+			// Motion clip: uploaded straight to Supabase Storage via a signed
+			// URL — clips easily exceed the intake's request-body limits (Next
+			// dev ~10MB, hosted Vercel ~4.5MB), so only the resulting public
+			// URL rides in the manifest. Best-effort: a failed clip degrades
+			// to screenshot-only rather than failing the frame.
+			if (frame.video && !isRemoteImage(frame.video)) {
+				try {
+					const raw = new Uint8Array(await readFile(join(outDir, frame.video)));
+					if (raw.byteLength > VIDEO_MAX_BYTES) {
+						skipped.push({
+							image: `${frame.video} (motion)`,
+							reason: "too-large",
+							bytes: raw.byteLength,
+						});
+					} else {
+						const publicUrl = await uploadClipDirect({
+							uploadEndpoint: url,
+							token,
+							buildSha: manifest.buildSha,
+							flowId: flow.id,
+							frameId: frame.id,
+							localPath: frame.video,
+							bytes: raw,
+							log,
+						});
+						if (publicUrl) {
+							videoUrls.set(frame.video, publicUrl);
+						} else {
+							skipped.push({ image: `${frame.video} (motion)`, reason: "read-error" });
+						}
+					}
+				} catch (err) {
+					const reason =
+						(err as NodeJS.ErrnoException)?.code === "ENOENT"
+							? "missing-file"
+							: "read-error";
+					skipped.push({ image: `${frame.video} (motion)`, reason });
+				}
 			}
 			// Past versions stay best-effort — missing version PNGs get
 			// reported but don't fail the frame they belong to.
@@ -760,9 +888,14 @@ async function uploadOne(args: {
 			.map((flow) => ({
 				...flow,
 				frames: flow.frames
-					.filter((f) => frameBytes.has(f.image))
+					.filter((f) => frameBytes.has(f.image) || isRemoteImage(f.image))
 					.map((f) => ({
 						...f,
+						video: f.video
+							? isRemoteImage(f.video)
+								? f.video
+								: videoUrls.get(f.video)
+							: undefined,
 						versions: (f.versions ?? []).filter((v) => versionBytes.has(v.image)),
 					})),
 			}))
@@ -808,6 +941,7 @@ async function uploadOne(args: {
 	let count = 0;
 	for (const flow of filteredManifest.flows) {
 		for (const frame of flow.frames) {
+			if (isRemoteImage(frame.image)) continue;
 			const ct = frameContentType.get(frame.image) ?? "image/png";
 			parts.push({
 				name: frame.image,

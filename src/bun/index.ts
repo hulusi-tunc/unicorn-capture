@@ -200,6 +200,25 @@ const snapServer = startSnapServer({
 				return { ok: false, error: (err as Error).message };
 			}
 		},
+		attachVideo: async (opts) => {
+			const orch = await ensureOrchestrator();
+			try {
+				const r = await orch.attachWebVideo({
+					projectId: opts.projectId,
+					url: opts.url,
+					videoBytes: opts.videoBytes,
+					mimeType: opts.mimeType,
+				});
+				if (!r.ok) return r;
+				return {
+					ok: true,
+					record: r.record as unknown as Record<string, unknown>,
+					route: r.route,
+				};
+			} catch (err) {
+				return { ok: false, error: (err as Error).message };
+			}
+		},
 	}),
 });
 async function ensureOrchestrator(): Promise<SnapOrchestrator> {
@@ -667,6 +686,33 @@ async function pushAll(
 			failed += snaps.length;
 			continue;
 		}
+		// Safety net: every push becomes the gallery's new "latest version",
+		// scoped to exactly the frames it carries. If this machine knows far
+		// fewer screens than the gallery currently shows (fresh install,
+		// Sync never run, wiped local state), pushing would collapse the
+		// customer-facing view down to a handful of frames. Compare against
+		// the gallery's current frame count and refuse with guidance.
+		try {
+			const manifestUrl = url.replace(/\/upload(\?.*)?$/, "/manifest");
+			const probe = await fetch(manifestUrl, {
+				headers: { authorization: `Bearer ${token}` },
+			});
+			if (probe.ok) {
+				const remote = (await probe.json()) as { frames?: unknown[] };
+				const remoteCount = remote.frames?.length ?? 0;
+				if (remoteCount > 0 && snaps.length < remoteCount * 0.8) {
+					const msg =
+						`Gallery currently shows ${remoteCount} screens but Capture would push only ${snaps.length} — ` +
+						`this machine is missing the rest (run Sync first, then push).`;
+					errors.push(`Project ${projectId}: ${msg}`);
+					failed += snaps.length;
+					continue;
+				}
+			}
+		} catch {
+			// Gallery unreachable for the probe — the push itself will surface
+			// a clearer error, so don't block on the safety check alone.
+		}
 		const session = {
 			sessionId: `sync-${Date.now()}`,
 			startedAt: new Date().toISOString(),
@@ -814,6 +860,7 @@ function snapToInfo(s: SnapRecord, outDir: string): RnSnapInfo {
 			navStack: v.navStack,
 		})),
 		fullPage: s.fullPage,
+		videoPath: s.video ? join(outDir, s.video) : undefined,
 	};
 }
 // Boot the orchestrator eagerly so the view's first status poll has a sessionId.
@@ -1252,7 +1299,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 						};
 					}
 					const body = (await res.json()) as {
-						app: { id: string; slug: string };
+						app: { id: string; slug: string; platform?: "ios" | "android" | "web" };
 						flows: Array<{
 							id: string;
 							name: string;
@@ -1273,6 +1320,7 @@ const rpc = BrowserView.defineRPC<ScenarioRunnerRPC>({
 					const orch = await ensureOrchestrator();
 					const result = await orch.mergeRemoteManifest({
 						projectId: body.app.slug,
+						platform: body.app.platform,
 						flows: body.flows,
 						frames: body.frames,
 					});

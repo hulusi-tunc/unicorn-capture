@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { stitchLongPageWithChrome } from "./long-page-stitch";
 import { captureSimulator } from "./simulator";
 import type { SnapServer, SnapSnapshot } from "./snap-server";
@@ -163,6 +163,13 @@ export interface SnapRecord {
 	 * they get one stamped on first push.
 	 */
 	gallerySyncRef?: string;
+	/**
+	 * Optional motion clip (webm/mp4) recorded for this snap — proof of
+	 * animations/interactions the still can't show. Local path relative
+	 * to outDir; rides along on push and plays in the gallery's frame
+	 * modal. Replaced wholesale on re-record (no version history).
+	 */
+	video?: string;
 }
 
 export interface SessionRecord {
@@ -402,6 +409,26 @@ export interface SnapOrchestrator {
 		};
 	}>;
 	/**
+	 * Attach a recorded motion clip (webm/mp4) to the most recent web snap
+	 * matching (projectId, route-derived-from-url). The clip is written
+	 * next to the snap's PNG and referenced via `SnapRecord.video`, so it
+	 * rides along on the next push. When that snap ALREADY carries a clip,
+	 * the still is duplicated into a fresh variant card and the new clip
+	 * attaches there — a landing page with five animations becomes five
+	 * cards, one clip each, instead of each recording overwriting the
+	 * last. Fails when no snap exists for the route — the still is the
+	 * poster, so it must be captured first (the extension auto-snaps).
+	 */
+	attachWebVideo(opts: {
+		projectId: string;
+		url: string;
+		videoBytes: Uint8Array;
+		mimeType: string;
+	}): Promise<
+		| { ok: true; record: SnapRecord; route: string }
+		| { ok: false; error: string }
+	>;
+	/**
 	 * Bridge-less capture: take a plain `simctl` screenshot of a booted
 	 * simulator and append it as a frame — no snap-bridge required. This is
 	 * the universal path that works for ANY app on the simulator (Flutter,
@@ -462,6 +489,10 @@ export interface SnapOrchestrator {
 	 */
 	mergeRemoteManifest(input: {
 		projectId: string;
+		/** The project's platform from the gallery — pulled snaps inherit it
+		 * so web frames don't masquerade as iOS (wrong bezel + push platform
+		 * mismatch). Defaults to "ios" for older callers. */
+		platform?: "ios" | "android" | "web";
 		flows: Array<{
 			id: string;
 			name: string;
@@ -1504,6 +1535,101 @@ export async function createSnapOrchestrator(
 		};
 	}
 
+	async function attachWebVideo(opts: {
+		projectId: string;
+		url: string;
+		videoBytes: Uint8Array;
+		mimeType: string;
+	}): Promise<
+		| { ok: true; record: SnapRecord; route: string }
+		| { ok: false; error: string }
+	> {
+		if (opts.videoBytes.byteLength === 0) {
+			return { ok: false, error: "empty video body" };
+		}
+		let route = "/";
+		try {
+			const u = new URL(opts.url);
+			route = u.pathname || "/";
+		} catch {
+			// Non-URL input — keep "/" as a safe fallback.
+		}
+		// Find the newest web snap for this (project, route) across every
+		// session — the clip attaches to whatever still the designer last
+		// captured of this screen.
+		let target: SnapRecord | null = null;
+		for (const sess of manifest.sessions) {
+			for (const sn of sess.snaps) {
+				if (sn.projectId !== opts.projectId) continue;
+				if (sn.platform !== "web") continue;
+				if (sn.route !== route) continue;
+				if (!target || sn.capturedAt > target.capturedAt) target = sn;
+			}
+		}
+		if (!target) {
+			return {
+				ok: false,
+				error: `No snap exists for ${route} yet — snap the screen first, then record.`,
+			};
+		}
+		// The matched snap already has a clip → don't overwrite it. Duplicate
+		// the still into a fresh variant card in the same flow and attach the
+		// new clip there, so multiple animations on one page each keep their
+		// own recording. Variant naming ("Home (2)", "Home (3)") comes from
+		// the existing slot-variant logic at push time.
+		if (target.video) {
+			if (!target.image) {
+				return {
+					ok: false,
+					error:
+						"The matched snap is remote-only (pulled from the gallery) — re-snap the screen locally, then record.",
+				};
+			}
+			sequence += 1;
+			const seqStr = String(sequence).padStart(3, "0");
+			const filename = `${seqStr}-${sanitize(route)}-${sanitize(target.stateHash || "default")}.png`;
+			const imageRel = join("screenshots", sessionId, filename);
+			const imageAbs = join(outDir, imageRel);
+			await mkdir(join(outDir, "screenshots", sessionId), { recursive: true });
+			await copyFile(join(outDir, target.image), imageAbs);
+			const rec: SnapRecord = {
+				projectId: target.projectId,
+				sessionId,
+				sequence,
+				platform: "web",
+				route,
+				stateHash: target.stateHash || "default",
+				image: imageRel,
+				capturedAt: new Date().toISOString(),
+				flowId: target.flowId,
+				...(target.displayName ? { displayName: target.displayName } : {}),
+				...(target.fullPage ? { fullPage: true } : {}),
+			};
+			session.snaps.push(rec);
+			if (!sessionAttached) {
+				manifest.sessions.push(session);
+				sessionAttached = true;
+			}
+			target = rec;
+		}
+		const ext = opts.mimeType.includes("mp4") ? "mp4" : "webm";
+		// Derive the clip path from the snap's PNG path so they live side
+		// by side and share cleanup fate.
+		const base = target.image.replace(/\.png$/i, "");
+		const videoRel = `${base || `motion-${target.sequence}`}-motion.${ext}`;
+		const videoAbs = join(outDir, videoRel);
+		await mkdir(dirname(videoAbs), { recursive: true });
+		// Re-record replaces the old clip; remove a stale one with the other
+		// extension so we don't leak both a .webm and an .mp4.
+		if (target.video && target.video !== videoRel) {
+			await unlink(join(outDir, target.video)).catch(() => {});
+		}
+		await writeFile(videoAbs, opts.videoBytes);
+		target.video = videoRel;
+		void saveManifest(manifestPath, manifest);
+		return { ok: true, record: target, route };
+	}
+
 	/**
 	 * See the interface doc. Mirrors `recordWebSnap`'s no-bridge append but
 	 * sources the image from `simctl` instead of a caller-supplied PNG. All
@@ -2198,8 +2324,10 @@ export async function createSnapOrchestrator(
 			}
 			// Delete the latest image AND every archived version. Each
 			// version has its own PNG on disk (from the moment it was the
-			// "latest" before being pushed into versions[]).
+			// "latest" before being pushed into versions[]). The motion clip
+			// (if recorded) shares the snap's fate too.
 			const paths = [rec.image, ...(rec.versions ?? []).map((v) => v.image)];
+			if (rec.video) paths.push(rec.video);
 			for (const p of paths) {
 				try {
 					await unlink(join(outDir, p));
@@ -2282,6 +2410,7 @@ export async function createSnapOrchestrator(
 	 */
 	async function mergeRemoteManifest(input: {
 		projectId: string;
+		platform?: "ios" | "android" | "web";
 		flows: Array<{
 			id: string;
 			name: string;
@@ -2391,9 +2520,18 @@ export async function createSnapOrchestrator(
 		}
 
 		// Track frames we've already synced (by gallerySyncRef) to skip dups.
+		// Scan EVERY session, not just the current one — each app launch
+		// starts a fresh session, so a current-session-only scan re-imported
+		// the full gallery on every restart+sync and duplicated everything.
 		const importedRefs = new Set<string>();
-		for (const s of session.snaps) {
-			if (s.gallerySyncRef) importedRefs.add(s.gallerySyncRef);
+		for (const sess of manifest.sessions) {
+			for (const sn of sess.snaps) {
+				if (sn.projectId !== input.projectId) continue;
+				if (sn.gallerySyncRef) importedRefs.add(sn.gallerySyncRef);
+			}
+		}
+		for (const sn of session.snaps) {
+			if (sn.gallerySyncRef) importedRefs.add(sn.gallerySyncRef);
 		}
 
 		// Sequence assignment: keep going from wherever the session left off.
@@ -2412,7 +2550,7 @@ export async function createSnapOrchestrator(
 				projectId: input.projectId,
 				sessionId,
 				sequence: nextSeq++,
-				platform: "ios",
+				platform: input.platform ?? "ios",
 				route: "",
 				stateHash: "",
 				image: "",
@@ -2421,8 +2559,19 @@ export async function createSnapOrchestrator(
 				flowId: rfr.flow_id,
 				gallerySyncRef: rfr.id,
 				position: rfr.frame_position ?? undefined,
+				// Without this, a pushed re-ref would rename the gallery frame
+				// to the route-derived fallback ("Home") — keep the real name.
+				...(rfr.frame_name ? { displayName: rfr.frame_name } : {}),
 			};
 			session.snaps.push(rec);
+			// Lazy-attach the current session exactly like recordWebSnap does.
+			// Without this, a sync in a fresh app run (no local snap yet)
+			// imports into an orphan session object that never serializes —
+			// flows persist but every pulled frame silently vanishes on save.
+			if (!sessionAttached) {
+				manifest.sessions.push(session);
+				sessionAttached = true;
+			}
 			importedRefs.add(rfr.id);
 			framesAdded += 1;
 		}
@@ -2455,6 +2604,7 @@ export async function createSnapOrchestrator(
 		deleteFlow,
 		reorderFlows,
 		recordWebSnap,
+		attachWebVideo,
 		recordDeviceSnap,
 		applyFlowGrouping,
 		ingestDeclaration,

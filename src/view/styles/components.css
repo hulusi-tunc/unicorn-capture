@@ -2227,6 +2227,11 @@ kbd {
 	letter-spacing: 0.08em;
 	pointer-events: none;
 }
+.web-library-badge.is-clip {
+	left: auto;
+	right: 40px;
+	background: oklch(0.5 0.22 254 / 0.85);
+}
 .web-library-updated {
 	position: absolute;
 	top: 16px;

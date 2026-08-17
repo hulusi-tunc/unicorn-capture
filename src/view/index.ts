@@ -1865,6 +1865,11 @@ function renderWebLibrary(refs: WebRefs): void {
 				badge.textContent = "FULL PAGE";
 				card.appendChild(badge);
 			}
+			if (sn.videoPath) {
+				const clipBadge = ce("div", "web-library-badge is-clip");
+				clipBadge.textContent = "CLIP";
+				card.appendChild(clipBadge);
+			}
 
 			// Thumbnail: standard viewport snaps render as a 16:10 cover-cropped
 			// img. Full-page snaps wrap the natural-size img in a 16:10 scroll
@@ -2031,7 +2036,21 @@ function openWebSnapLightbox(sn: RnSnapInfo): void {
 	closeBtn.addEventListener("click", close);
 
 	const scroll = ce("div", "web-snap-lightbox-scroll");
+	if (sn.videoPath) {
+		// Motion clip recorded for this snap — play it in place of the
+		// still (which doubles as poster). Muted loop, controls for scrub.
+		const video = ce("video", "web-snap-lightbox-img") as HTMLVideoElement;
+		video.src = toFileUrl(sn.videoPath);
+		video.poster = snapImageSrcFromInfo(sn);
+		video.autoplay = true;
+		video.muted = true;
+		video.loop = true;
+		video.controls = true;
+		video.playsInline = true;
+		scroll.appendChild(video);
+	}
 	const img = ce("img", "web-snap-lightbox-img");
+	if (sn.videoPath) img.style.display = "none";
 	img.src = snapImageSrcFromInfo(sn);
 	img.alt = sn.route;
 	// Show a clear placeholder when the source file is missing or zero-sized
